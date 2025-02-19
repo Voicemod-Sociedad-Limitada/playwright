@@ -30,7 +30,6 @@ export function registerESMLoader() {
   const { port1, port2 } = new MessageChannel();
   // register will wait until the loader is initialized.
   require('node:module').register(url.pathToFileURL(require.resolve('../transform/esmLoader')), {
-    parentURL: url.pathToFileURL(__filename),
     data: { port: port2 },
     transferList: [port2],
   });
@@ -77,5 +76,6 @@ export async function configureESMLoader() {
 export async function configureESMLoaderTransformConfig() {
   if (!loaderChannel)
     return;
+  await loaderChannel.send('setSingleTSConfig', { tsconfig: singleTSConfig() });
   await loaderChannel.send('setTransformConfig', { config: transformConfig() });
 }

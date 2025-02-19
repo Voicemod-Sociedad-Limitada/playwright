@@ -17,52 +17,39 @@
 import { EventEmitter } from 'events';
 import type { Frame } from '../frames';
 import type { Page } from '../page';
-import type { Signal } from './recorderActions';
-import type { ActionInContext } from '../codegen/types';
+import type { Signal } from '../../../../recorder/src/actions';
+import type * as actions from '@recorder/actions';
 import { monotonicTime } from '../../utils/time';
-import { callMetadataForAction, collapseActions, traceEventsToAction } from './recorderUtils';
-import { serializeError } from '../errors';
+import { collapseActions } from './recorderUtils';
 import { performAction } from './recorderRunner';
-import type { CallMetadata } from '@protocol/callMetadata';
 import { isUnderTest } from '../../utils/debug';
-import type { BrowserContext } from '../browserContext';
 
 export class RecorderCollection extends EventEmitter {
-  private _actions: ActionInContext[] = [];
-  private _enabled: boolean;
+  private _actions: actions.ActionInContext[] = [];
+  private _enabled = false;
   private _pageAliases: Map<Page, string>;
-  private _context: BrowserContext;
 
-  constructor(context: BrowserContext, pageAliases: Map<Page, string>, enabled: boolean) {
+  constructor(pageAliases: Map<Page, string>) {
     super();
-    this._context = context;
-    this._enabled = enabled;
     this._pageAliases = pageAliases;
-
-    if (process.env.PW_RECORDER_IS_TRACE_VIEWER) {
-      this._context.tracing.onMemoryEvents(events => {
-        this._actions = traceEventsToAction(events);
-        this._fireChange();
-      });
-    }
   }
 
   restart() {
     this._actions = [];
-    this._fireChange();
+    this.emit('change', []);
   }
 
   setEnabled(enabled: boolean) {
     this._enabled = enabled;
   }
 
-  async performAction(actionInContext: ActionInContext) {
-    await this._addAction(actionInContext, async callMetadata => {
-      await performAction(callMetadata, this._pageAliases, actionInContext);
+  async performAction(actionInContext: actions.ActionInContext) {
+    await this._addAction(actionInContext, async () => {
+      await performAction(this._pageAliases, actionInContext);
     });
   }
 
-  addRecordedAction(actionInContext: ActionInContext) {
+  addRecordedAction(actionInContext: actions.ActionInContext) {
     if (['openPage', 'closePage'].includes(actionInContext.action.name)) {
       this._actions.push(actionInContext);
       this._fireChange();
@@ -71,7 +58,7 @@ export class RecorderCollection extends EventEmitter {
     this._addAction(actionInContext).catch(() => {});
   }
 
-  private async _addAction(actionInContext: ActionInContext, callback?: (callMetadata: CallMetadata) => Promise<void>) {
+  private async _addAction(actionInContext: actions.ActionInContext, callback?: () => Promise<void>) {
     if (!this._enabled)
       return;
     if (actionInContext.action.name === 'openPage' || actionInContext.action.name === 'closePage') {
@@ -80,14 +67,10 @@ export class RecorderCollection extends EventEmitter {
       return;
     }
 
-    const { callMetadata, mainFrame } = callMetadataForAction(this._pageAliases, actionInContext);
-    await mainFrame.instrumentation.onBeforeCall(mainFrame, callMetadata);
     this._actions.push(actionInContext);
     this._fireChange();
-    const error = await callback?.(callMetadata).catch((e: Error) => e);
-    callMetadata.endTime = monotonicTime();
-    callMetadata.error = error ? serializeError(error) : undefined;
-    await mainFrame.instrumentation.onAfterCall(mainFrame, callMetadata);
+    await callback?.().catch();
+    actionInContext.endTime = monotonicTime();
   }
 
   signal(pageAlias: string, frame: Frame, signal: Signal) {
@@ -102,9 +85,9 @@ export class RecorderCollection extends EventEmitter {
       let generateGoto = false;
       if (!lastAction)
         generateGoto = true;
-      else if (lastAction.action.name !== 'click' && lastAction.action.name !== 'press')
+      else if (lastAction.action.name !== 'click' && lastAction.action.name !== 'press' && lastAction.action.name !== 'fill')
         generateGoto = true;
-      else if (timestamp - lastAction.timestamp > signalThreshold)
+      else if (timestamp - lastAction.startTime > signalThreshold)
         generateGoto = true;
 
       if (generateGoto) {
@@ -118,7 +101,8 @@ export class RecorderCollection extends EventEmitter {
             url: frame.url(),
             signals: [],
           },
-          timestamp
+          startTime: timestamp,
+          endTime: timestamp,
         });
       }
       return;
@@ -132,6 +116,9 @@ export class RecorderCollection extends EventEmitter {
   }
 
   private _fireChange() {
+    if (!this._enabled)
+      return;
+
     this.emit('change', collapseActions(this._actions));
   }
 }

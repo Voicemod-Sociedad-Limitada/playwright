@@ -65,8 +65,6 @@ export class CRPage implements PageDelegate {
   private readonly _pdf: CRPDF;
   private readonly _coverage: CRCoverage;
   readonly _browserContext: CRBrowserContext;
-  private readonly _pagePromise: Promise<Page | Error>;
-  _initializedPage: Page | null = null;
   private _isBackgroundPage: boolean;
 
   // Holds window features for the next popup being opened via window.open,
@@ -108,30 +106,11 @@ export class CRPage implements PageDelegate {
       if (viewportSize)
         this._page._emulatedSize = { viewport: viewportSize, screen: viewportSize };
     }
-    // Note: it is important to call |reportAsNew| before resolving pageOrError promise,
-    // so that anyone who awaits pageOrError got a ready and reported page.
-    this._pagePromise = this._mainFrameSession._initialize(bits.hasUIWindow).then(async r => {
-      await this._page.initOpener(this._opener);
-      return r;
-    }).catch(async e => {
-      await this._page.initOpener(this._opener);
-      throw e;
-    }).then(() => {
-      this._initializedPage = this._page;
-      this._reportAsNew();
-      return this._page;
-    }).catch(e => {
-      this._reportAsNew(e);
-      return e;
-    });
-  }
 
-  potentiallyUninitializedPage(): Page {
-    return this._page;
-  }
-
-  private _reportAsNew(error?: Error) {
-    this._page.reportAsNew(error, this._isBackgroundPage ? CRBrowserContext.CREvents.BackgroundPage : BrowserContext.Events.Page);
+    const createdEvent = this._isBackgroundPage ? CRBrowserContext.CREvents.BackgroundPage : BrowserContext.Events.Page;
+    this._mainFrameSession._initialize(bits.hasUIWindow).then(
+        () => this._page.reportAsNew(this._opener?._page, undefined, createdEvent),
+        error => this._page.reportAsNew(this._opener?._page, error, createdEvent));
   }
 
   private async _forAllFrameSessions(cb: (frame: FrameSession) => Promise<any>) {
@@ -166,10 +145,6 @@ export class CRPage implements PageDelegate {
 
   willBeginDownload() {
     this._mainFrameSession._willBeginDownload();
-  }
-
-  async pageOrError(): Promise<Page | Error> {
-    return this._pagePromise;
   }
 
   didClose() {
@@ -247,7 +222,7 @@ export class CRPage implements PageDelegate {
     return this._go(+1);
   }
 
-  async forceGarbageCollection(): Promise<void> {
+  async requestGC(): Promise<void> {
     await this._mainFrameSession._client.send('HeapProfiler.collectGarbage');
   }
 
@@ -364,6 +339,8 @@ export class CRPage implements PageDelegate {
   }
 
   async resetForReuse(): Promise<void> {
+    // See https://github.com/microsoft/playwright/issues/22432.
+    await this.rawMouse.move(-1, -1, 'none', new Set(), new Set(), true);
   }
 
   async pdf(options: channels.PagePdfParams): Promise<Buffer> {
@@ -430,6 +407,9 @@ class FrameSession {
       this._firstNonInitialNavigationCommittedFulfill = f;
       this._firstNonInitialNavigationCommittedReject = r;
     });
+    // The Promise is not always awaited (e.g. FrameSession._initialize can throw)
+    // so we catch errors here to prevent unhandled promise rejection.
+    this._firstNonInitialNavigationCommittedPromise.catch(() => {});
   }
 
   _isMainFrame(): boolean {
@@ -487,7 +467,7 @@ class FrameSession {
       // Note: it is important to start video recorder before sending Page.startScreencast,
       // and it is equally important to send Page.startScreencast before sending Runtime.runIfWaitingForDebugger.
       await this._createVideoRecorder(screencastId, screencastOptions);
-      this._crPage.pageOrError().then(p => {
+      this._crPage._page.waitForInitializedOrError().then(p => {
         if (p instanceof Error)
           this._stopVideoRecording().catch(() => {});
       });
@@ -694,16 +674,15 @@ class FrameSession {
     if (!frame || this._eventBelongsToStaleFrame(frame._id))
       return;
     const delegate = new CRExecutionContext(this._client, contextPayload);
-    let worldName: types.World;
+    let worldName: types.World|null = null;
     if (contextPayload.auxData && !!contextPayload.auxData.isDefault)
       worldName = 'main';
     else if (contextPayload.name === UTILITY_WORLD_NAME)
       worldName = 'utility';
-    else
-      return;
     const context = new dom.FrameExecutionContext(delegate, frame, worldName);
     (context as any)[contextDelegateSymbol] = delegate;
-    frame._contextCreated(worldName, context);
+    if (worldName)
+      frame._contextCreated(worldName, context);
     this._contextIdToContext.set(contextPayload.id, context);
   }
 
@@ -730,6 +709,10 @@ class FrameSession {
       if (!frame)
         return; // Subtree may be already gone due to renderer/browser race.
       this._page._frameManager.removeChildFramesRecursively(frame);
+      for (const [contextId, context] of this._contextIdToContext) {
+        if (context.frame === frame)
+          this._onExecutionContextDestroyed(contextId);
+      }
       const frameSession = new FrameSession(this._crPage, session, targetId, this);
       this._crPage._sessions.set(targetId, frameSession);
       frameSession._initialize(false).catch(e => e);
@@ -825,7 +808,7 @@ class FrameSession {
   }
 
   async _onBindingCalled(event: Protocol.Runtime.bindingCalledPayload) {
-    const pageOrError = await this._crPage.pageOrError();
+    const pageOrError = await this._crPage._page.waitForInitializedOrError();
     if (!(pageOrError instanceof Error)) {
       const context = this._contextIdToContext.get(event.executionContextId);
       if (context)
@@ -841,6 +824,9 @@ class FrameSession {
         event.type,
         event.message,
         async (accept: boolean, promptText?: string) => {
+          // TODO: this should actually be a CDP event that notifies about a cancelled navigation attempt.
+          if (this._isMainFrame() && event.type === 'beforeunload' && !accept)
+            this._page._frameManager.frameAbortedNavigation(this._page.mainFrame()._id, 'navigation cancelled by beforeunload dialog');
           await this._client.send('Page.handleJavaScriptDialog', { accept, promptText });
         },
         event.defaultPrompt));
@@ -887,8 +873,7 @@ class FrameSession {
   }
 
   _willBeginDownload() {
-    const originPage = this._crPage._initializedPage;
-    if (!originPage) {
+    if (!this._crPage._page.initializedOrUndefined()) {
       // Resume the page creation with an error. The page will automatically close right
       // after the download begins.
       this._firstNonInitialNavigationCommittedReject(new Error('Starting new page download'));
@@ -928,7 +913,7 @@ class FrameSession {
     });
     // Wait for the first frame before reporting video to the client.
     gotFirstFrame.then(() => {
-      this._crPage._browserContext._browser._videoStarted(this._crPage._browserContext, screencastId, options.outputFile, this._crPage.pageOrError());
+      this._crPage._browserContext._browser._videoStarted(this._crPage._browserContext, screencastId, options.outputFile, this._crPage._page.waitForInitializedOrError());
     });
   }
 

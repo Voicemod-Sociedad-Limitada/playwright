@@ -31,7 +31,7 @@ import * as accessibility from './accessibility';
 import { FileChooser } from './fileChooser';
 import type { Progress } from './progress';
 import { ProgressController } from './progress';
-import { LongStandingScope, assert, createGuid } from '../utils';
+import { LongStandingScope, assert, compressCallLog, createGuid, trimStringWithEllipsis } from '../utils';
 import { ManualPromise } from '../utils/manualPromise';
 import { debugLogger } from '../utils/debugLogger';
 import type { ImageComparatorOptions } from '../utils/comparators';
@@ -43,8 +43,9 @@ import type { TimeoutOptions } from '../common/types';
 import { isInvalidSelectorError } from '../utils/isomorphic/selectorParser';
 import { parseEvaluationResultValue, source } from './isomorphic/utilityScriptSerializers';
 import type { SerializedValue } from './isomorphic/utilityScriptSerializers';
-import { TargetClosedError } from './errors';
+import { TargetClosedError, TimeoutError } from './errors';
 import { asLocator } from '../utils';
+import { helper } from './helper';
 
 export interface PageDelegate {
   readonly rawMouse: input.RawMouse;
@@ -54,12 +55,10 @@ export interface PageDelegate {
   reload(): Promise<void>;
   goBack(): Promise<boolean>;
   goForward(): Promise<boolean>;
-  forceGarbageCollection(): Promise<void>;
+  requestGC(): Promise<void>;
   addInitScript(initScript: InitScript): Promise<void>;
   removeNonInternalInitScripts(): Promise<void>;
   closePage(runBeforeUnload: boolean): Promise<void>;
-  potentiallyUninitializedPage(): Page;
-  pageOrError(): Promise<Page | Error>;
 
   navigateFrame(frame: frames.Frame, url: string, referrer: string | undefined): Promise<frames.GotoResult>;
 
@@ -138,7 +137,8 @@ export class Page extends SdkObject {
 
   private _closedState: 'open' | 'closing' | 'closed' = 'open';
   private _closedPromise = new ManualPromise<void>();
-  private _initialized = false;
+  private _initialized: Page | Error | undefined;
+  private _initializedPromise = new ManualPromise<Page | Error>();
   private _eventsToEmitAfterInitialized: { event: string | symbol, args: any[] }[] = [];
   private _crashed = false;
   readonly openScope = new LongStandingScope();
@@ -163,7 +163,6 @@ export class Page extends SdkObject {
   _clientRequestInterceptor: network.RouteHandler | undefined;
   _serverRequestInterceptor: network.RouteHandler | undefined;
   _ownedContext: BrowserContext | undefined;
-  _pageIsError: Error | undefined;
   _video: Artifact | null = null;
   _opener: Page | undefined;
   private _isServerSideOnly = false;
@@ -193,23 +192,24 @@ export class Page extends SdkObject {
     this.coverage = delegate.coverage ? delegate.coverage() : null;
   }
 
-  async initOpener(opener: PageDelegate | null) {
-    if (!opener)
-      return;
-    const openerPage = await opener.pageOrError();
-    if (openerPage instanceof Page && !openerPage.isClosed())
-      this._opener = openerPage;
+  async reportAsNew(opener: Page | undefined, error: Error | undefined = undefined, contextEvent: string = BrowserContext.Events.Page) {
+    if (opener) {
+      const openerPageOrError = await opener.waitForInitializedOrError();
+      if (openerPageOrError instanceof Page && !openerPageOrError.isClosed())
+        this._opener = openerPageOrError;
+    }
+    this._markInitialized(error, contextEvent);
   }
 
-  reportAsNew(error: Error | undefined = undefined, contextEvent: string = BrowserContext.Events.Page) {
+  private _markInitialized(error: Error | undefined = undefined, contextEvent: string = BrowserContext.Events.Page) {
     if (error) {
       // Initialization error could have happened because of
       // context/browser closure. Just ignore the page.
       if (this._browserContext.isClosingOrClosed())
         return;
-      this._setIsError(error);
+      this._frameManager.createDummyMainFrameIfNeeded();
     }
-    this._initialized = true;
+    this._initialized = error || this;
     this.emitOnContext(contextEvent, this);
 
     for (const { event, args } of this._eventsToEmitAfterInitialized)
@@ -223,10 +223,18 @@ export class Page extends SdkObject {
       this.emit(Page.Events.Close);
     else
       this.instrumentation.onPageOpen(this);
+
+    // Note: it is important to resolve _initializedPromise at the end,
+    // so that anyone who awaits waitForInitializedOrError got a ready and reported page.
+    this._initializedPromise.resolve(this._initialized);
   }
 
-  initializedOrUndefined() {
+  initializedOrUndefined(): Page | undefined {
     return this._initialized ? this : undefined;
+  }
+
+  waitForInitializedOrError(): Promise<Page | Error> {
+    return this._initializedPromise;
   }
 
   emitOnContext(event: string | symbol, ...args: any[]) {
@@ -431,8 +439,8 @@ export class Page extends SdkObject {
     }), this._timeoutSettings.navigationTimeout(options));
   }
 
-  forceGarbageCollection(): Promise<void> {
-    return this._delegate.forceGarbageCollection();
+  requestGC(): Promise<void> {
+    return this._delegate.requestGC();
   }
 
   registerLocatorHandler(selector: string, noWaitAfter: boolean | undefined) {
@@ -455,7 +463,34 @@ export class Page extends SdkObject {
     this._locatorHandlers.delete(uid);
   }
 
-  async performLocatorHandlersCheckpoint(progress: Progress) {
+  async performActionPreChecks(progress: Progress) {
+    await this._performWaitForNavigationCheck(progress);
+    progress.throwIfAborted();
+    await this._performLocatorHandlersCheckpoint(progress);
+    progress.throwIfAborted();
+    // Wait once again, just in case a locator handler caused a navigation.
+    await this._performWaitForNavigationCheck(progress);
+  }
+
+  private async _performWaitForNavigationCheck(progress: Progress) {
+    if (process.env.PLAYWRIGHT_SKIP_NAVIGATION_CHECK)
+      return;
+    const mainFrame = this._frameManager.mainFrame();
+    if (!mainFrame || !mainFrame.pendingDocument())
+      return;
+    const url = mainFrame.pendingDocument()?.request?.url();
+    const toUrl = url ? `" ${trimStringWithEllipsis(url, 200)}"` : '';
+    progress.log(`  waiting for${toUrl} navigation to finish...`);
+    await helper.waitForEvent(progress, mainFrame, frames.Frame.Events.InternalNavigation, (e: frames.NavigationEvent) => {
+      if (!e.isPublic)
+        return false;
+      if (!e.error)
+        progress.log(`  navigated to "${trimStringWithEllipsis(mainFrame.url(), 200)}"`);
+      return true;
+    }).promise;
+  }
+
+  private async _performLocatorHandlersCheckpoint(progress: Progress) {
     // Do not run locator handlers from inside locator handler callbacks to avoid deadlocks.
     if (this._locatorHandlerRunningCounter)
       return;
@@ -529,8 +564,8 @@ export class Page extends SdkObject {
     await this._delegate.bringToFront();
   }
 
-  async addInitScript(source: string) {
-    const initScript = new InitScript(source);
+  async addInitScript(source: string, name?: string) {
+    const initScript = new InitScript(source, false /* internal */, name);
     this.initScripts.push(initScript);
     await this._delegate.addInitScript(initScript);
   }
@@ -559,7 +594,7 @@ export class Page extends SdkObject {
     const rafrafScreenshot = locator ? async (progress: Progress, timeout: number) => {
       return await locator.frame.rafrafTimeoutScreenshotElementWithProgress(progress, locator.selector, timeout, options || {});
     } : async (progress: Progress, timeout: number) => {
-      await this.performLocatorHandlersCheckpoint(progress);
+      await this.performActionPreChecks(progress);
       await this.mainFrame().rafrafTimeout(timeout);
       return await this._screenshotter.screenshotPage(progress, options || {});
     };
@@ -634,7 +669,7 @@ export class Page extends SdkObject {
         return {};
       }
 
-      if (areEqualScreenshots(actual, options.expected, previous)) {
+      if (areEqualScreenshots(actual, options.expected, undefined)) {
         progress.log(`screenshot matched expectation`);
         return {};
       }
@@ -644,10 +679,14 @@ export class Page extends SdkObject {
       // A: We want user to receive a friendly diff between actual and expected/previous.
       if (js.isJavaScriptErrorInEvaluate(e) || isInvalidSelectorError(e))
         throw e;
+      let errorMessage = e.message;
+      if (e instanceof TimeoutError && intermediateResult?.previous)
+        errorMessage = `Failed to take two consecutive stable screenshots.`;
       return {
-        log: e.message ? [...metadata.log, e.message] : metadata.log,
+        log: compressCallLog(e.message ? [...metadata.log, e.message] : metadata.log),
         ...intermediateResult,
-        errorMessage: e.message,
+        errorMessage,
+        timedOut: (e instanceof TimeoutError),
       };
     });
   }
@@ -675,11 +714,6 @@ export class Page extends SdkObject {
       await this._closedPromise;
     if (this._ownedContext)
       await this._ownedContext.close(options);
-  }
-
-  private _setIsError(error: Error) {
-    this._pageIsError = error;
-    this._frameManager.createDummyMainFrameIfNeeded();
   }
 
   isClosed(): boolean {
@@ -919,8 +953,9 @@ function addPageBinding(playwrightBinding: string, bindingName: string, needsHan
 export class InitScript {
   readonly source: string;
   readonly internal: boolean;
+  readonly name?: string;
 
-  constructor(source: string, internal?: boolean) {
+  constructor(source: string, internal?: boolean, name?: string) {
     const guid = createGuid();
     this.source = `(() => {
       globalThis.__pwInitScripts = globalThis.__pwInitScripts || {};
@@ -931,6 +966,7 @@ export class InitScript {
       ${source}
     })();`;
     this.internal = !!internal;
+    this.name = name;
   }
 }
 

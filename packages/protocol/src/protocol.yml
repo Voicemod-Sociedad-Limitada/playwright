@@ -791,7 +791,8 @@ DebugController:
 
     highlight:
       parameters:
-        selector: string
+        selector: string?
+        ariaTemplate: string?
 
     hideHighlight:
 
@@ -806,6 +807,7 @@ DebugController:
       parameters:
         selector: string
         locator: string
+        ariaSnapshot: string
 
     setModeRequested:
       parameters:
@@ -1187,7 +1189,7 @@ BrowserContext:
     pause:
       experimental: True
 
-    recorderSupplementEnable:
+    enableRecorder:
       experimental: True
       parameters:
         language: string?
@@ -1203,6 +1205,7 @@ BrowserContext:
         device: string?
         saveStorage: string?
         outputFile: string?
+        handleSIGINT: boolean?
         omitCallTracking: boolean?
 
     newCDPSession:
@@ -1445,7 +1448,7 @@ Page:
         slowMo: true
         snapshot: true
 
-    forceGarbageCollection:
+    requestGC:
 
     registerLocatorHandler:
       parameters:
@@ -1476,7 +1479,7 @@ Page:
     expectScreenshot:
       parameters:
         expected: binary?
-        timeout: number?
+        timeout: number
         isNot: boolean
         locator:
           type: object?
@@ -1495,6 +1498,7 @@ Page:
         errorMessage: string?
         actual: binary?
         previous: binary?
+        timedOut: boolean?
         log:
           type: array?
           items: string
@@ -1666,6 +1670,8 @@ Page:
         root: ElementHandle?
       returns:
         rootAXNode: AXNode?
+      flags:
+        snapshot: true
 
     pdf:
       parameters:
@@ -1870,6 +1876,15 @@ Frame:
       flags:
         snapshot: true
 
+    ariaSnapshot:
+      parameters:
+        selector: string
+        timeout: number?
+      returns:
+        snapshot: string
+      flags:
+        snapshot: true
+
     blur:
       parameters:
         selector: string
@@ -1927,6 +1942,8 @@ Frame:
     content:
       returns:
         value: string
+      flags:
+        snapshot: true
 
     dragAndDrop:
       parameters:
@@ -2186,6 +2203,8 @@ Frame:
         strict: boolean?
       returns:
         element: ElementHandle?
+      flags:
+        snapshot: true
 
     querySelectorAll:
       parameters:
@@ -2194,12 +2213,16 @@ Frame:
         elements:
           type: array
           items: ElementHandle
+      flags:
+        snapshot: true
 
     queryCount:
       parameters:
         selector: string
       returns:
         value: number
+      flags:
+        snapshot: true
 
     selectOption:
       parameters:
@@ -2374,7 +2397,7 @@ Frame:
         expectedValue: SerializedArgument?
         useInnerText: boolean?
         isNot: boolean
-        timeout: number?
+        timeout: number
       returns:
         matches: boolean
         received: SerializedValue?
@@ -2483,10 +2506,6 @@ JSHandle:
       returns:
         value: SerializedValue
 
-    objectCount:
-      returns:
-        count: number
-
   events:
 
     previewUpdated:
@@ -2528,6 +2547,8 @@ ElementHandle:
     boundingBox:
       returns:
         value: Rect?
+      flags:
+        snapshot: true
 
     check:
       parameters:
@@ -2573,6 +2594,8 @@ ElementHandle:
     contentFrame:
       returns:
         frame: Frame?
+      flags:
+        snapshot: true
 
     dblclick:
       parameters:
@@ -2727,6 +2750,8 @@ ElementHandle:
         strict: boolean?
       returns:
         element: ElementHandle?
+      flags:
+        snapshot: true
 
     querySelectorAll:
       parameters:
@@ -2735,6 +2760,8 @@ ElementHandle:
         elements:
           type: array
           items: ElementHandle
+      flags:
+        snapshot: true
 
     screenshot:
       parameters:
@@ -2941,7 +2968,6 @@ Route:
     abort:
       parameters:
         errorCode: string?
-        requestUrl: string
 
     continue:
       parameters:
@@ -2951,7 +2977,6 @@ Route:
           type: array?
           items: NameValue
         postData: binary?
-        requestUrl: string
         isFallback: boolean
 
     fulfill:
@@ -2964,7 +2989,6 @@ Route:
         body: string?
         isBase64: boolean?
         fetchResponseUid: string?
-        requestUrl: string
 
 
 WebSocketRoute:
@@ -2989,10 +3013,17 @@ WebSocketRoute:
         message: string
         isBase64: boolean
 
-    close:
+    closePage:
       parameters:
         code: number?
         reason: string?
+        wasClean: boolean
+
+    closeServer:
+      parameters:
+        code: number?
+        reason: string?
+        wasClean: boolean
 
   events:
 
@@ -3006,7 +3037,17 @@ WebSocketRoute:
         message: string
         isBase64: boolean
 
-    close:
+    closePage:
+      parameters:
+        code: number?
+        reason: string?
+        wasClean: boolean
+
+    closeServer:
+      parameters:
+        code: number?
+        reason: string?
+        wasClean: boolean
 
 
 ResourceTiming:
@@ -3173,6 +3214,18 @@ Tracing:
         title: string?
       returns:
         traceName: string
+
+    tracingGroup:
+      parameters:
+        name: string
+        location:
+          type: object?
+          properties:
+            file: string
+            line: number?
+            column: number?
+
+    tracingGroupEnd:
 
     tracingStopChunk:
       parameters:

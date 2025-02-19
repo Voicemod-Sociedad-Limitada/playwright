@@ -27,8 +27,9 @@ export type ServerRouteHandler = (request: http.IncomingMessage, response: http.
 
 export type Transport = {
   sendEvent?: (method: string, params: any) => void;
-  dispatch: (method: string, params: any) => Promise<any>;
   close?: () => void;
+  onconnect: () => void;
+  dispatch: (method: string, params: any) => Promise<any>;
   onclose: () => void;
 };
 
@@ -82,6 +83,7 @@ export class HttpServer {
     this._wsGuid = guid || createGuid();
     const wss = new wsServer({ server: this._server, path: '/' + this._wsGuid });
     wss.on('connection', ws => {
+      transport.onconnect();
       transport.sendEvent = (method, params)  => ws.send(JSON.stringify({ method, params }));
       transport.close = () => ws.close();
       ws.on('message', async message => {
@@ -212,12 +214,6 @@ export class HttpServer {
   }
 
   private _onRequest(request: http.IncomingMessage, response: http.ServerResponse) {
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Request-Method', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'OPTIONS, GET');
-    if (request.headers.origin)
-      response.setHeader('Access-Control-Allow-Headers', request.headers.origin);
-
     if (request.method === 'OPTIONS') {
       response.writeHead(200);
       response.end();

@@ -25,7 +25,7 @@ import zlib from 'zlib';
 import type { HTTPCredentials } from '../../types/types';
 import { TimeoutSettings } from '../common/timeoutSettings';
 import { getUserAgent } from '../utils/userAgent';
-import { assert, createGuid, monotonicTime } from '../utils';
+import { assert, constructURLBasedOnBaseURL, createGuid, eventsHelper, monotonicTime, type RegisteredListener } from '../utils';
 import { HttpsProxyAgent, SocksProxyAgent } from '../utilsBundle';
 import { BrowserContext, verifyClientCertificates } from './browserContext';
 import { CookieStore, domainMatches, parseRawCookie } from './cookieStore';
@@ -159,7 +159,7 @@ export abstract class APIRequestContext extends SdkObject {
         setHeader(headers, name, value);
     }
 
-    const requestUrl = new URL(params.url, defaults.baseURL);
+    const requestUrl = new URL(constructURLBasedOnBaseURL(defaults.baseURL, params.url));
     if (params.encodedParams) {
       requestUrl.search = params.encodedParams;
     } else if (params.params) {
@@ -303,6 +303,7 @@ export abstract class APIRequestContext extends SdkObject {
       const requestOptions = { ...options, agent };
 
       const startAt = monotonicTime();
+      let reusedSocketAt: number | undefined;
       let dnsLookupAt: number | undefined;
       let tcpConnectionAt: number | undefined;
       let tlsHandshakeAt: number | undefined;
@@ -312,19 +313,23 @@ export abstract class APIRequestContext extends SdkObject {
 
       let securityDetails: har.SecurityDetails | undefined;
 
+      const listeners: RegisteredListener[] = [];
+
       const request = requestConstructor(url, requestOptions as any, async response => {
         const responseAt = monotonicTime();
+
         const notifyRequestFinished = (body?: Buffer) => {
           const endAt = monotonicTime();
           // spec: http://www.softwareishard.com/blog/har-12-spec/#timings
+          const connectEnd = tlsHandshakeAt ?? tcpConnectionAt;
           const timings: har.Timings = {
             send: requestFinishAt! - startAt,
             wait: responseAt - requestFinishAt!,
             receive: endAt - responseAt,
             dns: dnsLookupAt ? dnsLookupAt - startAt : -1,
-            connect: (tlsHandshakeAt ?? tcpConnectionAt!) - startAt, // "If [ssl] is defined then the time is also included in the connect field "
+            connect: connectEnd ? connectEnd - startAt : -1, // "If [ssl] is defined then the time is also included in the connect field "
             ssl: tlsHandshakeAt ? tlsHandshakeAt - tcpConnectionAt! : -1,
-            blocked: -1,
+            blocked: reusedSocketAt ? reusedSocketAt - startAt : -1,
           };
 
           const requestFinishedEvent: APIRequestFinishedEvent = {
@@ -478,36 +483,44 @@ export abstract class APIRequestContext extends SdkObject {
       });
       request.on('error', reject);
 
-      const disposeListener = () => {
-        reject(new Error('Request context disposed.'));
-        request.destroy();
-      };
-      this.on(APIRequestContext.Events.Dispose, disposeListener);
-      request.on('close', () => this.off(APIRequestContext.Events.Dispose, disposeListener));
+      listeners.push(
+          eventsHelper.addEventListener(this, APIRequestContext.Events.Dispose, () => {
+            reject(new Error('Request context disposed.'));
+            request.destroy();
+          })
+      );
+      request.on('close', () => eventsHelper.removeEventListeners(listeners));
 
       request.on('socket', socket => {
+        if (request.reusedSocket) {
+          reusedSocketAt = monotonicTime();
+          return;
+        }
+
         // happy eyeballs don't emit lookup and connect events, so we use our custom ones
         const happyEyeBallsTimings = timingForSocket(socket);
         dnsLookupAt = happyEyeBallsTimings.dnsLookupAt;
         tcpConnectionAt = happyEyeBallsTimings.tcpConnectionAt;
 
         // non-happy-eyeballs sockets
-        socket.on('lookup', () => { dnsLookupAt = monotonicTime(); });
-        socket.on('connect', () => { tcpConnectionAt = monotonicTime(); });
-        socket.on('secureConnect', () => {
-          tlsHandshakeAt = monotonicTime();
+        listeners.push(
+            eventsHelper.addEventListener(socket, 'lookup', () => { dnsLookupAt = monotonicTime(); }),
+            eventsHelper.addEventListener(socket, 'connect', () => { tcpConnectionAt = monotonicTime(); }),
+            eventsHelper.addEventListener(socket, 'secureConnect', () => {
+              tlsHandshakeAt = monotonicTime();
 
-          if (socket instanceof TLSSocket) {
-            const peerCertificate = socket.getPeerCertificate();
-            securityDetails = {
-              protocol: socket.getProtocol() ?? undefined,
-              subjectName: peerCertificate.subject.CN,
-              validFrom: new Date(peerCertificate.valid_from).getTime() / 1000,
-              validTo: new Date(peerCertificate.valid_to).getTime() / 1000,
-              issuer: peerCertificate.issuer.CN
-            };
-          }
-        });
+              if (socket instanceof TLSSocket) {
+                const peerCertificate = socket.getPeerCertificate();
+                securityDetails = {
+                  protocol: socket.getProtocol() ?? undefined,
+                  subjectName: peerCertificate.subject.CN,
+                  validFrom: new Date(peerCertificate.valid_from).getTime() / 1000,
+                  validTo: new Date(peerCertificate.valid_to).getTime() / 1000,
+                  issuer: peerCertificate.issuer.CN
+                };
+              }
+            }),
+        );
 
         serverIPAddress = socket.remoteAddress;
         serverPort = socket.remotePort;

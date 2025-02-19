@@ -22,6 +22,7 @@ import * as dom from '../dom';
 import * as dialog from '../dialog';
 import type * as frames from '../frames';
 import { Page } from '../page';
+import type * as channels from '@protocol/channels';
 import type { InitScript, PageDelegate } from '../page';
 import type { Progress } from '../progress';
 import type * as types from '../types';
@@ -32,6 +33,7 @@ import * as bidi from './third_party/bidiProtocol';
 import { BidiExecutionContext } from './bidiExecutionContext';
 import { BidiNetworkManager } from './bidiNetworkManager';
 import { BrowserContext } from '../browserContext';
+import { BidiPDF } from './bidiPdf';
 
 const UTILITY_WORLD_NAME = '__playwright_utility_world__';
 const kPlaywrightBindingChannel = 'playwrightChannel';
@@ -41,14 +43,13 @@ export class BidiPage implements PageDelegate {
   readonly rawKeyboard: RawKeyboardImpl;
   readonly rawTouchscreen: RawTouchscreenImpl;
   readonly _page: Page;
-  private readonly _pagePromise: Promise<Page | Error>;
   readonly _session: BidiSession;
   readonly _opener: BidiPage | null;
   private readonly _realmToContext: Map<string, dom.FrameExecutionContext>;
   private _sessionListeners: RegisteredListener[] = [];
   readonly _browserContext: BidiBrowserContext;
   readonly _networkManager: BidiNetworkManager;
-  _initializedPage: Page | null = null;
+  private readonly _pdf: BidiPDF;
   private _initScriptIds: string[] = [];
 
   constructor(browserContext: BidiBrowserContext, bidiSession: BidiSession, opener: BidiPage | null) {
@@ -61,6 +62,7 @@ export class BidiPage implements PageDelegate {
     this._page = new Page(this, browserContext);
     this._browserContext = browserContext;
     this._networkManager = new BidiNetworkManager(this._session, this._page, this._onNavigationResponseStarted.bind(this));
+    this._pdf = new BidiPDF(this._session);
     this._page.on(Page.Events.FrameDetached, (frame: frames.Frame) => this._removeContextsForFrame(frame, false));
     this._sessionListeners = [
       eventsHelper.addEventListener(bidiSession, 'script.realmCreated', this._onRealmCreated.bind(this)),
@@ -77,16 +79,10 @@ export class BidiPage implements PageDelegate {
     ];
 
     // Initialize main frame.
-    this._pagePromise = this._initialize().finally(async () => {
-      await this._page.initOpener(this._opener);
-    }).then(() => {
-      this._initializedPage = this._page;
-      this._page.reportAsNew();
-      return this._page;
-    }).catch(e => {
-      this._page.reportAsNew(e);
-      return e;
-    });
+    // TODO: Wait for first execution context to be created and maybe about:blank navigated.
+    this._initialize().then(
+        () => this._page.reportAsNew(this._opener?._page),
+        error => this._page.reportAsNew(this._opener?._page, error));
   }
 
   private async _initialize() {
@@ -105,19 +101,10 @@ export class BidiPage implements PageDelegate {
     return Promise.all(this._page.allInitScripts().map(initScript => this.addInitScript(initScript)));
   }
 
-  potentiallyUninitializedPage(): Page {
-    return this._page;
-  }
-
   didClose() {
     this._session.dispose();
     eventsHelper.removeEventListeners(this._sessionListeners);
     this._page._didClose();
-  }
-
-  async pageOrError(): Promise<Page | Error> {
-    // TODO: Wait for first execution context to be created and maybe about:blank navigated.
-    return this._pagePromise;
   }
 
   private _onFrameAttached(frameId: string, parentFrameId: string | null): frames.Frame {
@@ -279,6 +266,9 @@ export class BidiPage implements PageDelegate {
   }
 
   async bringToFront(): Promise<void> {
+    await this._session.send('browsingContext.activate', {
+      context: this._session.sessionId,
+    });
   }
 
   private async _updateViewport(): Promise<void> {
@@ -333,7 +323,7 @@ export class BidiPage implements PageDelegate {
     }).then(() => true).catch(() => false);
   }
 
-  async forceGarbageCollection(): Promise<void> {
+  async requestGC(): Promise<void> {
     throw new Error('Method not implemented.');
   }
 
@@ -365,7 +355,7 @@ export class BidiPage implements PageDelegate {
   private async _onScriptMessage(event: bidi.Script.MessageParameters) {
     if (event.channel !== kPlaywrightBindingChannel)
       return;
-    const pageOrError = await this.pageOrError();
+    const pageOrError = await this._page.waitForInitializedOrError();
     if (pageOrError instanceof Error)
       return;
     const context = this._realmToContext.get(event.source.realm);
@@ -409,7 +399,7 @@ export class BidiPage implements PageDelegate {
       context: this._session.sessionId,
       format: {
         type: `image/${format === 'png' ? 'png' : 'jpeg'}`,
-        quality: quality || 80,
+        quality: quality ? quality / 100 : 0.8,
       },
       origin: documentRect ? 'document' : 'viewport',
       clip: {
@@ -553,6 +543,10 @@ export class BidiPage implements PageDelegate {
   }
 
   async resetForReuse(): Promise<void> {
+  }
+
+  async pdf(options: channels.PagePdfParams): Promise<Buffer> {
+    return this._pdf.generate(options);
   }
 
   async getFrameElement(frame: frames.Frame): Promise<dom.ElementHandle> {

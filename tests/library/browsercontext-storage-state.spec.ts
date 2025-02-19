@@ -204,13 +204,13 @@ it('should handle missing file', async ({ contextFactory }, testInfo) => {
   expect(error.message).toContain(`Error reading storage state from ${file}:\nENOENT`);
 });
 
-it('should handle malformed file', async ({ contextFactory }, testInfo) => {
+it('should handle malformed file', async ({ contextFactory, nodeVersion }, testInfo) => {
   const file = testInfo.outputPath('state.json');
   fs.writeFileSync(file, 'not-json', 'utf-8');
   const error = await contextFactory({
     storageState: file,
   }).catch(e => e);
-  if (+process.versions.node.split('.')[0] > 18)
+  if (nodeVersion.major > 18)
     expect(error.message).toContain(`Error reading storage state from ${file}:\nUnexpected token 'o', \"not-json\" is not valid JSON`);
   else
     expect(error.message).toContain(`Error reading storage state from ${file}:\nUnexpected token o in JSON at position 1`);
@@ -277,9 +277,7 @@ it('should work when service worker is intefering', async ({ page, context, serv
   expect(storageState.origins[0].localStorage[0]).toEqual({ name: 'foo', value: 'bar' });
 });
 
-it('should set local storage in third-party context', async ({ contextFactory, server, browserName }) => {
-  it.fixme(browserName === 'webkit', 'look into setStorageBlockingPolicy');
-
+it('should set local storage in third-party context', async ({ contextFactory, server }) => {
   const context = await contextFactory({
     storageState: {
       cookies: [],
@@ -303,9 +301,7 @@ it('should set local storage in third-party context', async ({ contextFactory, s
   await context.close();
 });
 
-it('should roundtrip local storage in third-party context', async ({ page, contextFactory, server, browserName }) => {
-  it.fixme(browserName === 'webkit', 'look into setStorageBlockingPolicy');
-
+it('should roundtrip local storage in third-party context', async ({ page, contextFactory, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const frame = await attachFrame(page, 'frame1', server.CROSS_PROCESS_PREFIX + '/empty.html');
   await frame.evaluate(() => window.localStorage.setItem('name1', 'value1'));

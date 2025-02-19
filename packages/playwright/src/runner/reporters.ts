@@ -16,7 +16,8 @@
 
 import path from 'path';
 import type { FullConfig, TestError } from '../../types/testReporter';
-import { colors, formatError } from '../reporters/base';
+import { formatError, terminalScreen } from '../reporters/base';
+import type { Screen } from '../reporters/base';
 import DotReporter from '../reporters/dot';
 import EmptyReporter from '../reporters/empty';
 import GitHubReporter from '../reporters/github';
@@ -25,7 +26,6 @@ import JSONReporter from '../reporters/json';
 import JUnitReporter from '../reporters/junit';
 import LineReporter from '../reporters/line';
 import ListReporter from '../reporters/list';
-import MarkdownReporter from '../reporters/markdown';
 import type { Suite } from '../common/test';
 import type { BuiltInReporter, FullConfigInternal } from '../common/config';
 import { loadReporter } from './loadUtils';
@@ -45,7 +45,6 @@ export async function createReporters(config: FullConfigInternal, mode: 'list' |
     junit: JUnitReporter,
     null: EmptyReporter,
     html: HtmlReporter,
-    markdown: MarkdownReporter,
   };
   const reporters: ReporterV2[] = [];
   descriptions ??= config.config.reporter;
@@ -90,14 +89,14 @@ interface ErrorCollectingReporter extends ReporterV2 {
   errors(): TestError[];
 }
 
-export function createErrorCollectingReporter(writeToConsole?: boolean): ErrorCollectingReporter {
+export function createErrorCollectingReporter(screen: Screen, writeToConsole?: boolean): ErrorCollectingReporter {
   const errors: TestError[] = [];
   return {
     version: () => 'v2',
     onError(error: TestError) {
       errors.push(error);
       if (writeToConsole)
-        process.stdout.write(formatError(error, colors.enabled).message + '\n');
+        process.stdout.write(formatError(screen, error).message + '\n');
     },
     errors: () => errors,
   };
@@ -162,6 +161,6 @@ class ListModeReporter implements ReporterV2 {
 
   onError(error: TestError) {
     // eslint-disable-next-line no-console
-    console.error('\n' + formatError(error, false).message);
+    console.error('\n' + formatError(terminalScreen, error).message);
   }
 }

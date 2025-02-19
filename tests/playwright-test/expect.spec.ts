@@ -511,13 +511,13 @@ test('should support toHaveURL with baseURL from webServer', async ({ runInlineT
       import { test, expect } from '@playwright/test';
 
       test('pass', async ({ page }) => {
-        await page.goto('/foobar');
-        await expect(page).toHaveURL('/foobar');
-        await expect(page).toHaveURL('http://localhost:${port}/foobar');
+        await page.goto('/hello');
+        await expect(page).toHaveURL('/hello');
+        await expect(page).toHaveURL('http://localhost:${port}/hello');
       });
 
       test('fail', async ({ page }) => {
-        await page.goto('/foobar');
+        await page.goto('/hello');
         await expect(page).toHaveURL('/kek', { timeout: 1000 });
       });
       `,
@@ -614,6 +614,33 @@ test('should print pending operations for toHaveText', async ({ runInlineTest })
   expect(output).toContain('Expected string: "Text"');
   expect(output).toContain('Received: <element(s) not found>');
   expect(output).toContain('waiting for locator(\'no-such-thing\')');
+});
+
+test('should only highlight unmatched regex in diff message for toHaveText with array', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.spec.ts': `
+      import { test, expect } from '@playwright/test';
+
+      test('toHaveText with mixed strings and regexes (array)', async ({ page }) => {
+        await page.setContent(\`
+          <ul>
+            <li>Coffee</li>
+            <li>Tea</li>
+            <li>Milk</li>
+          </ul>
+        \`);
+
+        const items = page.locator('li');
+        await expect(items).toHaveText(['Coffee', /\\d+/, /Milk/]);
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(1);
+  const output = result.output;
+  expect(output).toContain('-   /\\d+/,');
+  expect(output).toContain('+   "Tea",');
+  expect(output).not.toContain('-   /Milk/,');
+  expect(output).not.toContain('-   "Coffee",');
 });
 
 test('should print expected/received on Ctrl+C', async ({ interactWithTestRunner }) => {
@@ -1068,4 +1095,74 @@ test('expect.extend should be immutable', async ({ runInlineTest }) => {
     'foo',
     'bar',
   ]);
+});
+
+test('expect.extend should fall back to legacy behavior', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      expect.extend({
+        toFoo() {
+          console.log('%%foo');
+          return { pass: true };
+        }
+      });
+      expect.extend({
+        toFoo() {
+          console.log('%%foo2');
+          return { pass: true };
+        }
+      });
+      expect.extend({
+        toBar() {
+          console.log('%%bar');
+          return { pass: true };
+        }
+      });
+      test('logs', () => {
+        expect().toFoo();
+        expect().toBar();
+      });
+    `
+  });
+  expect(result.outputLines).toEqual([
+    'foo2',
+    'bar',
+  ]);
+});
+
+test('custom asymmetric matchers should work with expect.extend', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect as baseExpect, mergeExpects } from '@playwright/test';
+      const expect1 = baseExpect.extend({
+        isFoo(received: unknown, expected: string) {
+          return { pass: received === 'foo', message: () => '' };
+        },
+      });
+      const expect2 = baseExpect.extend({
+        isSomething(received: unknown, expected: string) {
+          return { pass: received === expected, message: () => '' };
+        },
+      });
+      const expect = mergeExpects(expect1, expect2);
+      test('example', () => {
+        expect('foo').toEqual(expect.isFoo());
+        expect('bar').toEqual(expect.isSomething('bar'));
+        try {
+          expect('foo2').toEqual(expect.isFoo());
+          console.log('should not run 1');
+        } catch (e) {
+        }
+        try {
+          expect('bar2').toEqual(expect.isSomething('bar'));
+          console.log('should not run 2');
+        } catch (e) {
+        }
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+  expect(result.output).not.toContain('should not run');
 });

@@ -24,9 +24,8 @@ import type { ErrorDescription } from './errorsTab';
 import type { ConsoleEntry } from './consoleTab';
 import { ConsoleTab, useConsoleTabModel } from './consoleTab';
 import type * as modelUtil from './modelUtil';
-import { isRouteAction } from './modelUtil';
 import { NetworkTab, useNetworkTabModel } from './networkTab';
-import { SnapshotTab } from './snapshotTab';
+import { SnapshotTabsView } from './snapshotTab';
 import { SourceTab } from './sourceTab';
 import { TabbedPane } from '@web/components/tabbedPane';
 import type { TabbedPaneTabModel } from '@web/components/tabbedPane';
@@ -34,7 +33,7 @@ import { Timeline } from './timeline';
 import { MetadataView } from './metadataView';
 import { AttachmentsTab } from './attachmentsTab';
 import { AnnotationsTab } from './annotationsTab';
-import type { Boundaries } from '../geometry';
+import type { Boundaries } from './geometry';
 import { InspectorTab } from './inspectorTab';
 import { ToolbarButton } from '@web/components/toolbarButton';
 import { useSetting, msToString, clsx } from '@web/uiUtils';
@@ -42,7 +41,8 @@ import type { Entry } from '@trace/har';
 import './workbench.css';
 import { testStatusIcon, testStatusText } from './testUtils';
 import type { UITestStatus } from './testUtils';
-import { SettingsView } from './settingsView';
+import type { AfterActionTraceEventAttachment } from '@trace/trace';
+import type { HighlightedElement } from './snapshotTab';
 
 export const Workbench: React.FunctionComponent<{
   model?: modelUtil.MultiTraceModel,
@@ -50,36 +50,37 @@ export const Workbench: React.FunctionComponent<{
   rootDir?: string,
   fallbackLocation?: modelUtil.SourceLocation,
   isLive?: boolean,
+  hideTimeline?: boolean,
   status?: UITestStatus,
   annotations?: { type: string; description?: string; }[];
   inert?: boolean,
-  openPage?: (url: string, target?: string) => Window | any,
   onOpenExternally?: (location: modelUtil.SourceLocation) => void,
   revealSource?: boolean,
-  showSettings?: boolean,
-}> = ({ model, showSourcesFirst, rootDir, fallbackLocation, isLive, status, annotations, inert, openPage, onOpenExternally, revealSource, showSettings }) => {
+}> = ({ model, showSourcesFirst, rootDir, fallbackLocation, isLive, hideTimeline, status, annotations, inert, onOpenExternally, revealSource }) => {
   const [selectedCallId, setSelectedCallId] = React.useState<string | undefined>(undefined);
   const [revealedError, setRevealedError] = React.useState<ErrorDescription | undefined>(undefined);
-
-  const [highlightedAction, setHighlightedAction] = React.useState<modelUtil.ActionTraceEventInContext | undefined>();
+  const [revealedAttachment, setRevealedAttachment] = React.useState<[attachment: AfterActionTraceEventAttachment, renderCounter: number] | undefined>(undefined);
+  const [highlightedCallId, setHighlightedCallId] = React.useState<string | undefined>();
   const [highlightedEntry, setHighlightedEntry] = React.useState<Entry | undefined>();
   const [highlightedConsoleMessage, setHighlightedConsoleMessage] = React.useState<ConsoleEntry | undefined>();
   const [selectedNavigatorTab, setSelectedNavigatorTab] = React.useState<string>('actions');
   const [selectedPropertiesTab, setSelectedPropertiesTab] = useSetting<string>('propertiesTab', showSourcesFirst ? 'source' : 'call');
   const [isInspecting, setIsInspectingState] = React.useState(false);
-  const [highlightedLocator, setHighlightedLocator] = React.useState<string>('');
+  const [highlightedElement, setHighlightedElement] = React.useState<HighlightedElement>({ lastEdited: 'none' });
   const [selectedTime, setSelectedTime] = React.useState<Boundaries | undefined>();
   const [sidebarLocation, setSidebarLocation] = useSetting<'bottom' | 'right'>('propertiesSidebarLocation', 'bottom');
-  const [showRouteActions, setShowRouteActions] = useSetting('show-route-actions', true);
-  const [showScreenshot, setShowScreenshot] = useSetting('screenshot-instead-of-snapshot', false);
-
-  const filteredActions = React.useMemo(() => {
-    return (model?.actions || []).filter(action => showRouteActions || !isRouteAction(action));
-  }, [model, showRouteActions]);
 
   const setSelectedAction = React.useCallback((action: modelUtil.ActionTraceEventInContext | undefined) => {
     setSelectedCallId(action?.callId);
     setRevealedError(undefined);
+  }, []);
+
+  const highlightedAction = React.useMemo(() => {
+    return model?.actions.find(a => a.callId === highlightedCallId);
+  }, [model, highlightedCallId]);
+
+  const setHighlightedAction = React.useCallback((highlightedAction: modelUtil.ActionTraceEventInContext | undefined) => {
+    setHighlightedCallId(highlightedAction?.callId);
   }, []);
 
   const sources = React.useMemo(() => model?.sources || new Map<string, modelUtil.SourceModel>(), [model]);
@@ -113,15 +114,15 @@ export const Workbench: React.FunctionComponent<{
     }
   }, [model, selectedCallId]);
 
-  const revealedStack = React.useMemo(() => {
-    if (revealedError)
-      return revealedError.stack;
-    return selectedAction?.stack;
-  }, [selectedAction, revealedError]);
-
   const activeAction = React.useMemo(() => {
     return highlightedAction || selectedAction;
   }, [selectedAction, highlightedAction]);
+
+  const revealedStack = React.useMemo(() => {
+    if (revealedError)
+      return revealedError.stack;
+    return activeAction?.stack;
+  }, [activeAction, revealedError]);
 
   const onActionSelected = React.useCallback((action: modelUtil.ActionTraceEventInContext) => {
     setSelectedAction(action);
@@ -140,9 +141,19 @@ export const Workbench: React.FunctionComponent<{
     setIsInspectingState(value);
   }, [setIsInspectingState, selectPropertiesTab, isInspecting]);
 
-  const locatorPicked = React.useCallback((locator: string) => {
-    setHighlightedLocator(locator);
+  const elementPicked = React.useCallback((element: HighlightedElement) => {
+    setHighlightedElement(element);
     selectPropertiesTab('inspector');
+  }, [selectPropertiesTab]);
+
+  const revealAttachment = React.useCallback((attachment: AfterActionTraceEventAttachment) => {
+    selectPropertiesTab('attachments');
+    setRevealedAttachment(currentValue => {
+      if (!currentValue)
+        return [attachment, 0];
+      const revealCounter = currentValue[1];
+      return [attachment, revealCounter + 1];
+    });
   }, [selectPropertiesTab]);
 
   React.useEffect(() => {
@@ -165,13 +176,13 @@ export const Workbench: React.FunctionComponent<{
     render: () => <InspectorTab
       sdkLanguage={sdkLanguage}
       setIsInspecting={setIsInspecting}
-      highlightedLocator={highlightedLocator}
-      setHighlightedLocator={setHighlightedLocator} />,
+      highlightedElement={highlightedElement}
+      setHighlightedElement={setHighlightedElement} />,
   };
   const callTab: TabbedPaneTabModel = {
     id: 'call',
     title: 'Call',
-    render: () => <CallTab action={activeAction} sdkLanguage={sdkLanguage} />
+    render: () => <CallTab action={activeAction} startTimeOffset={model?.startTime ?? 0} sdkLanguage={sdkLanguage} />
   };
   const logTab: TabbedPaneTabModel = {
     id: 'log',
@@ -226,13 +237,13 @@ export const Workbench: React.FunctionComponent<{
     id: 'network',
     title: 'Network',
     count: networkModel.resources.length,
-    render: () => <NetworkTab boundaries={boundaries} networkModel={networkModel} onEntryHovered={setHighlightedEntry}/>
+    render: () => <NetworkTab boundaries={boundaries} networkModel={networkModel} onEntryHovered={setHighlightedEntry} sdkLanguage={model?.sdkLanguage ?? 'javascript'} />
   };
   const attachmentsTab: TabbedPaneTabModel = {
     id: 'attachments',
     title: 'Attachments',
     count: attachments.length,
-    render: () => <AttachmentsTab model={model} />
+    render: () => <AttachmentsTab model={model} revealedAttachment={revealedAttachment} />
   };
 
   const tabs: TabbedPaneTabModel[] = [
@@ -291,12 +302,13 @@ export const Workbench: React.FunctionComponent<{
       </div>}
       <ActionList
         sdkLanguage={sdkLanguage}
-        actions={filteredActions}
+        actions={model?.actions || []}
         selectedAction={model ? selectedAction : undefined}
         selectedTime={selectedTime}
         setSelectedTime={setSelectedTime}
         onSelected={onActionSelected}
         onHighlighted={setHighlightedAction}
+        revealAttachment={revealAttachment}
         revealConsole={() => selectPropertiesTab('console')}
         isLive={isLive}
       />
@@ -307,17 +319,9 @@ export const Workbench: React.FunctionComponent<{
     title: 'Metadata',
     component: <MetadataView model={model}/>
   };
-  const settingsTab: TabbedPaneTabModel = {
-    id: 'settings',
-    title: 'Settings',
-    component: <SettingsView settings={[
-      { value: showRouteActions, set: setShowRouteActions, title: 'Show route actions' },
-      { value: showScreenshot, set: setShowScreenshot, title: 'Show screenshot instead of snapshot' }
-    ]}/>,
-  };
 
   return <div className='vbox workbench' {...(inert ? { inert: 'true' } : {})}>
-    <Timeline
+    {!hideTimeline && <Timeline
       model={model}
       consoleEntries={consoleModel.entries}
       boundaries={boundaries}
@@ -328,7 +332,7 @@ export const Workbench: React.FunctionComponent<{
       sdkLanguage={sdkLanguage}
       selectedTime={selectedTime}
       setSelectedTime={setSelectedTime}
-    />
+    />}
     <SplitView
       sidebarSize={250}
       orientation={sidebarLocation === 'bottom' ? 'vertical' : 'horizontal'} settingName='propertiesSidebar'
@@ -337,19 +341,18 @@ export const Workbench: React.FunctionComponent<{
         orientation='horizontal'
         sidebarIsFirst
         settingName='actionListSidebar'
-        main={<SnapshotTab
+        main={<SnapshotTabsView
           action={activeAction}
           model={model}
           sdkLanguage={sdkLanguage}
           testIdAttributeName={model?.testIdAttributeName || 'data-testid'}
           isInspecting={isInspecting}
           setIsInspecting={setIsInspecting}
-          highlightedLocator={highlightedLocator}
-          setHighlightedLocator={locatorPicked}
-          openPage={openPage} />}
+          highlightedElement={highlightedElement}
+          setHighlightedElement={elementPicked} />}
         sidebar={
           <TabbedPane
-            tabs={showSettings ? [actionsTab, metadataTab, settingsTab] : [actionsTab, metadataTab]}
+            tabs={[actionsTab, metadataTab]}
             selectedTab={selectedNavigatorTab}
             setSelectedTab={setSelectedNavigatorTab}
           />

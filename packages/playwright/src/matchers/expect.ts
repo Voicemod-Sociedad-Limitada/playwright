@@ -19,7 +19,6 @@ import {
   createGuid,
   isString,
   pollAgainstDeadline } from 'playwright-core/lib/utils';
-import type { ExpectZone } from 'playwright-core/lib/utils';
 import {
   toBeAttached,
   toBeChecked,
@@ -35,6 +34,7 @@ import {
   toContainText,
   toHaveAccessibleDescription,
   toHaveAccessibleName,
+  toHaveAccessibleErrorMessage,
   toHaveAttribute,
   toHaveClass,
   toHaveCount,
@@ -61,7 +61,8 @@ import {
 } from '../common/expectBundle';
 import { zones } from 'playwright-core/lib/utils';
 import { TestInfoImpl } from '../worker/testInfo';
-import { ExpectError, isExpectError } from './matcherHint';
+import { ExpectError, isJestError } from './matcherHint';
+import { toMatchAriaSnapshot } from './toMatchAriaSnapshot';
 
 // #region
 // Mirrored from https://github.com/facebook/jest/blob/f13abff8df9a0e1148baf3584bcde6d1b479edc7/packages/expect/src/print.ts
@@ -140,8 +141,7 @@ function createExpect(info: ExpectMetaInfo, prefix: string[], customMatchers: Re
           const wrappedMatchers: any = {};
           const extendedMatchers: any = { ...customMatchers };
           for (const [name, matcher] of Object.entries(matchers)) {
-            const key = qualifiedMatcherName(qualifier, name);
-            wrappedMatchers[key] = function(...args: any[]) {
+            wrappedMatchers[name] = function(...args: any[]) {
               const { isNot, promise, utils } = this;
               const newThis: ExpectMatcherState = {
                 isNot,
@@ -152,6 +152,8 @@ function createExpect(info: ExpectMetaInfo, prefix: string[], customMatchers: Re
               (newThis as any).equals = throwUnsupportedExpectMatcherError;
               return (matcher as any).call(newThis, ...args);
             };
+            const key = qualifiedMatcherName(qualifier, name);
+            wrappedMatchers[key] = wrappedMatchers[name];
             Object.defineProperty(wrappedMatchers[key], 'name', { value: name });
             extendedMatchers[name] = wrappedMatchers[key];
           }
@@ -222,6 +224,7 @@ const customAsyncMatchers = {
   toContainText,
   toHaveAccessibleDescription,
   toHaveAccessibleName,
+  toHaveAccessibleErrorMessage,
   toHaveAttribute,
   toHaveClass,
   toHaveCount,
@@ -235,6 +238,7 @@ const customAsyncMatchers = {
   toHaveValue,
   toHaveValues,
   toHaveScreenshot,
+  toMatchAriaSnapshot,
   toPass,
 };
 
@@ -310,9 +314,10 @@ class ExpectMetaInfoProxyHandler implements ProxyHandler<any> {
       // out all the frames that belong to the test runner from caught runtime errors.
       const stackFrames = filteredStackTrace(captureRawStack());
 
-      // Enclose toPass in a step to maintain async stacks, toPass matcher is always async.
+      // toPass and poll matchers can contain other steps, expects and API calls,
+      // so they behave like a retriable step.
       const stepInfo = {
-        category: 'expect',
+        category: (matcherName === 'toPass' || this._info.poll) ? 'step' : 'expect',
         title: trimLongString(title, 1024),
         params: args[0] ? { expected: args[0] } : undefined,
         infectParentStepsWithError: this._info.isSoft,
@@ -320,8 +325,15 @@ class ExpectMetaInfoProxyHandler implements ProxyHandler<any> {
 
       const step = testInfo._addStep(stepInfo);
 
-      const reportStepError = (jestError: Error | unknown) => {
-        const error = isExpectError(jestError) ? new ExpectError(jestError, customMessage, stackFrames) : jestError;
+      const reportStepError = (e: Error | unknown) => {
+        const jestError = isJestError(e) ? e : null;
+        const error = jestError ? new ExpectError(jestError, customMessage, stackFrames) : e;
+        if (jestError?.matcherResult.suggestedRebaseline) {
+          // NOTE: this is a workaround for the fact that we can't pass the suggested rebaseline
+          // for passing matchers. See toMatchAriaSnapshot for a counterpart.
+          step.complete({ suggestedRebaseline: jestError?.matcherResult.suggestedRebaseline });
+          return;
+        }
         step.complete({ error });
         if (this._info.isSoft)
           testInfo._failWithError(error);
@@ -335,11 +347,7 @@ class ExpectMetaInfoProxyHandler implements ProxyHandler<any> {
 
       try {
         const callback = () => matcher.call(target, ...args);
-        // toPass and poll matchers can contain other steps, expects and API calls,
-        // so they behave like a retriable step.
-        const result = (matcherName === 'toPass' || this._info.poll) ?
-          zones.run('stepZone', step, callback) :
-          zones.run<ExpectZone, any>('expectZone', { title, stepId: step.stepId }, callback);
+        const result = zones.run('stepZone', step, callback);
         if (result instanceof Promise)
           return result.then(finalizer).catch(reportStepError);
         finalizer();

@@ -39,9 +39,7 @@ import type { Dialog } from '../dialog';
 import type { ConsoleMessage } from '../console';
 import { serializeError } from '../errors';
 import { ElementHandleDispatcher } from './elementHandlerDispatcher';
-import { RecorderInTraceViewer } from '../recorder/recorderInTraceViewer';
 import { RecorderApp } from '../recorder/recorderApp';
-import type { IRecorderAppFactory } from '../recorder/recorderFrontend';
 import { WebSocketRouteDispatcher } from './webSocketRouteDispatcher';
 
 export class BrowserContextDispatcher extends Dispatcher<BrowserContext, channels.BrowserContextChannel, DispatcherScope> implements channels.BrowserContextChannel {
@@ -289,7 +287,7 @@ export class BrowserContextDispatcher extends Dispatcher<BrowserContext, channel
   async setWebSocketInterceptionPatterns(params: channels.PageSetWebSocketInterceptionPatternsParams, metadata: CallMetadata): Promise<void> {
     this._webSocketInterceptionPatterns = params.patterns;
     if (params.patterns.length)
-      await WebSocketRouteDispatcher.installIfNeeded(this, this._context);
+      await WebSocketRouteDispatcher.installIfNeeded(this._context);
   }
 
   async storageState(params: channels.BrowserContextStorageStateParams, metadata: CallMetadata): Promise<channels.BrowserContextStorageStateResult> {
@@ -301,21 +299,8 @@ export class BrowserContextDispatcher extends Dispatcher<BrowserContext, channel
     await this._context.close(params);
   }
 
-  async recorderSupplementEnable(params: channels.BrowserContextRecorderSupplementEnableParams): Promise<void> {
-    let factory: IRecorderAppFactory;
-    if (process.env.PW_RECORDER_IS_TRACE_VIEWER) {
-      factory = RecorderInTraceViewer.factory(this._context);
-      await this._context.tracing.start({
-        name: 'trace',
-        snapshots: true,
-        screenshots: false,
-        live: true,
-      });
-      await this._context.tracing.startChunk({ name: 'trace', title: 'trace' });
-    } else {
-      factory = RecorderApp.factory(this._context);
-    }
-    await Recorder.show(this._context, factory, params);
+  async enableRecorder(params: channels.BrowserContextEnableRecorderParams): Promise<void> {
+    await Recorder.show(this._context, RecorderApp.factory(this._context), params);
   }
 
   async pause(params: channels.BrowserContextPauseParams, metadata: CallMetadata) {
