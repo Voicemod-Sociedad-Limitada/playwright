@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-import type * as channels from '@protocol/channels';
 import { ChannelOwner } from './channelOwner';
-import { parseSerializedValue, serializeValue } from '../protocol/serializers';
-import type * as api from '../../types/types';
-import type * as structs from '../../types/structs';
 import { isTargetClosedError } from './errors';
+import { parseSerializedValue, serializeValue } from '../protocol/serializers';
+
+import type * as structs from '../../types/structs';
+import type * as api from '../../types/types';
+import type * as channels from '@protocol/channels';
+
 
 export class JSHandle<T = any> extends ChannelOwner<channels.JSHandleChannel> implements api.JSHandle {
   private _preview: string;
@@ -36,6 +38,11 @@ export class JSHandle<T = any> extends ChannelOwner<channels.JSHandleChannel> im
 
   async evaluate<R, Arg>(pageFunction: structs.PageFunctionOn<T, Arg, R>, arg?: Arg): Promise<R> {
     const result = await this._channel.evaluateExpression({ expression: String(pageFunction), isFunction: typeof pageFunction === 'function', arg: serializeArgument(arg) });
+    return parseResult(result.value);
+  }
+
+  async _evaluateFunction(functionDeclaration: string) {
+    const result = await this._channel.evaluateExpression({ expression: functionDeclaration, isFunction: true, arg: serializeArgument(undefined) });
     return parseResult(result.value);
   }
 

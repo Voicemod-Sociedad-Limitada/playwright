@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
+import crypto from 'crypto';
+
 import { filterStackFile, formatLocation } from '../util';
-import * as crypto from 'crypto';
+
+import type { FixturesWithLocation } from './config';
 import type { Fixtures } from '../../types/test';
 import type { Location } from '../../types/testReporter';
-import type { FixturesWithLocation } from './config';
 
 export type FixtureScope = 'test' | 'worker';
 type FixtureAuto = boolean | 'all-hooks-included';
@@ -128,7 +130,8 @@ export class FixturePool {
           continue;
         }
       } else if (previous) {
-        options = { auto: previous.auto, scope: previous.scope, option: previous.option, timeout: previous.timeout, customTitle: previous.customTitle, box: previous.box };
+        // Note: deliberately not inheriting "options.box" so that fixture override is visible by default.
+        options = { auto: previous.auto, scope: previous.scope, option: previous.option, timeout: previous.timeout, customTitle: previous.customTitle };
       } else if (!options) {
         options = { auto: false, scope: 'test', option: false, timeout: undefined };
       }

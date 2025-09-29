@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
+import type { Size } from '../utils/isomorphic/types';
 import type * as channels from '@protocol/channels';
-import type { Size } from '../common/types';
-export type { Size, Point, Rect, Quad, TimeoutOptions, HeadersArray } from '../common/types';
+export type { HeadersArray, Point, Quad, Rect, Size } from '../utils/isomorphic/types';
 
 type LoggerSeverity = 'verbose' | 'info' | 'warning' | 'error';
 export interface Logger {
@@ -25,23 +25,24 @@ export interface Logger {
   log(name: string, severity: LoggerSeverity, message: string | Error, args: any[], hints: { color?: string }): void;
 }
 
+export type TimeoutOptions = { timeout?: number };
 export type StrictOptions = { strict?: boolean };
 export type Headers = { [key: string]: string };
 export type Env = { [key: string]: string | number | boolean | undefined };
 
-export type WaitForEventOptions = Function | { predicate?: Function, timeout?: number };
-export type WaitForFunctionOptions = { timeout?: number, polling?: 'raf' | number };
+export type WaitForEventOptions = Function | TimeoutOptions & { predicate?: Function };
+export type WaitForFunctionOptions = TimeoutOptions & { polling?: 'raf' | number };
 
 export type SelectOption = { value?: string, label?: string, index?: number, valueOrLabel?: string };
-export type SelectOptionOptions = { force?: boolean, timeout?: number };
+export type SelectOptionOptions = TimeoutOptions & { force?: boolean };
 export type FilePayload = { name: string, mimeType: string, buffer: Buffer };
 export type StorageState = {
   cookies: channels.NetworkCookie[],
-  origins: channels.OriginStorage[]
+  origins: (Omit<channels.OriginStorage, 'indexedDB'>)[],
 };
 export type SetStorageState = {
   cookies?: channels.SetNetworkCookie[],
-  origins?: channels.OriginStorage[]
+  origins?: (Omit<channels.SetOriginStorage, 'indexedDB'> & { indexedDB?: unknown[] })[]
 };
 
 export type LifecycleEvent = channels.LifecycleEvent;
@@ -58,7 +59,7 @@ export type ClientCertificate = {
   passphrase?: string;
 };
 
-export type BrowserContextOptions = Omit<channels.BrowserNewContextOptions, 'viewport' | 'noDefaultViewport' | 'extraHTTPHeaders' | 'clientCertificates' | 'storageState' | 'recordHar' | 'colorScheme' | 'reducedMotion' | 'forcedColors' | 'acceptDownloads'> & {
+export type BrowserContextOptions = Omit<channels.BrowserNewContextOptions, 'viewport' | 'noDefaultViewport' | 'extraHTTPHeaders' | 'clientCertificates' | 'storageState' | 'recordHar' | 'colorScheme' | 'reducedMotion' | 'forcedColors' | 'acceptDownloads' | 'contrast'> & {
   viewport?: Size | null;
   extraHTTPHeaders?: Headers;
   logger?: Logger;
@@ -80,6 +81,7 @@ export type BrowserContextOptions = Omit<channels.BrowserNewContextOptions, 'vie
   colorScheme?: 'dark' | 'light' | 'no-preference' | null;
   reducedMotion?: 'reduce' | 'no-preference' | null;
   forcedColors?: 'active' | 'none' | null;
+  contrast?: 'more' | 'no-preference' | null;
   acceptDownloads?: boolean;
   clientCertificates?: ClientCertificate[];
 };
@@ -89,7 +91,7 @@ type LaunchOverrides = {
   env?: Env;
   logger?: Logger;
   firefoxUserPrefs?: { [key: string]: string | number | boolean };
-};
+} & TimeoutOptions;
 
 export type LaunchOptions = Omit<channels.BrowserTypeLaunchOptions, 'ignoreAllDefaultArgs' | 'ignoreDefaultArgs' | 'env' | 'firefoxUserPrefs'> & LaunchOverrides;
 export type LaunchPersistentContextOptions = Omit<LaunchOptions & BrowserContextOptions, 'storageState'>;
@@ -104,30 +106,11 @@ export type ConnectOptions = {
   logger?: Logger,
 };
 export type LaunchServerOptions = {
-  channel?: channels.BrowserTypeLaunchOptions['channel'],
-  executablePath?: string,
-  args?: string[],
-  ignoreDefaultArgs?: boolean | string[],
-  handleSIGINT?: boolean,
-  handleSIGTERM?: boolean,
-  handleSIGHUP?: boolean,
-  timeout?: number,
-  env?: Env,
-  headless?: boolean,
-  devtools?: boolean,
-  proxy?: {
-    server: string,
-    bypass?: string,
-    username?: string,
-    password?: string
-  },
-  downloadsPath?: string,
-  chromiumSandbox?: boolean,
   host?: string,
   port?: number,
   wsPath?: string,
-  logger?: Logger,
-  firefoxUserPrefs?: { [key: string]: string | number | boolean };
+  _debugController?: boolean;
+  _sharedBrowser?: boolean;
 };
 
 export type LaunchAndroidServerOptions = {

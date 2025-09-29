@@ -16,14 +16,17 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { Page } from './page';
-import { findChromiumChannel } from './registry';
-import { isUnderTest } from '../utils';
-import { serverSideCallMetadata } from './instrumentation';
-import type * as types from './types';
+
+import { isUnderTest, rewriteErrorMessage, wrapInASCIIBox } from '../utils';
+import { buildPlaywrightCLICommand, findChromiumChannelBestEffort } from './registry';
+import { registryDirectory } from './registry';
+import { ProgressController } from './progress';
+
 import type { BrowserType } from './browserType';
 import type { CRPage } from './chromium/crPage';
-import { registryDirectory } from './registry';
+import type { Page } from './page';
+import type * as types from './types';
+
 
 export async function launchApp(browserType: BrowserType, options: {
   sdkLanguage: string,
@@ -33,6 +36,7 @@ export async function launchApp(browserType: BrowserType, options: {
 }) {
   const args = [...options.persistentContextOptions?.args ?? []];
 
+  let channel = options.persistentContextOptions?.channel;
   if (browserType.name() === 'chromium') {
     args.push(
         '--app=data:text/html,',
@@ -40,17 +44,33 @@ export async function launchApp(browserType: BrowserType, options: {
         ...(options.windowPosition ? [`--window-position=${options.windowPosition.x},${options.windowPosition.y}`] : []),
         '--test-type=',
     );
+    if (!channel && !options.persistentContextOptions?.executablePath)
+      channel = findChromiumChannelBestEffort(options.sdkLanguage);
   }
 
-  const context = await browserType.launchPersistentContext(serverSideCallMetadata(), '', {
-    ignoreDefaultArgs: ['--enable-automation'],
-    ...options?.persistentContextOptions,
-    channel: options.persistentContextOptions?.channel ?? (!options.persistentContextOptions?.executablePath ? findChromiumChannel(options.sdkLanguage) : undefined),
-    noDefaultViewport: options.persistentContextOptions?.noDefaultViewport ?? true,
-    acceptDownloads: options?.persistentContextOptions?.acceptDownloads ?? (isUnderTest() ? 'accept' : 'internal-browser-default'),
-    colorScheme: options?.persistentContextOptions?.colorScheme ?? 'no-override',
-    args,
-  });
+  const controller = new ProgressController();
+  let context;
+  try {
+    context = await controller.run(progress => browserType.launchPersistentContext(progress, '', {
+      ignoreDefaultArgs: ['--enable-automation'],
+      ...options?.persistentContextOptions,
+      channel,
+      noDefaultViewport: options.persistentContextOptions?.noDefaultViewport ?? true,
+      acceptDownloads: options?.persistentContextOptions?.acceptDownloads ?? (isUnderTest() ? 'accept' : 'internal-browser-default'),
+      colorScheme: options?.persistentContextOptions?.colorScheme ?? 'no-override',
+      args,
+    }), 0); // Deliberately no timeout for our apps.
+  } catch (error) {
+    if (channel) {
+      error = rewriteErrorMessage(error, [
+        `Failed to launch "${channel}" channel.`,
+        'Using custom channels could lead to unexpected behavior due to Enterprise policies (chrome://policy).',
+        'Install the default browser instead:',
+        wrapInASCIIBox(`${buildPlaywrightCLICommand(options.sdkLanguage, 'install')}`, 2),
+      ].join('\n'));
+    }
+    throw error;
+  }
   const [page] = context.pages();
   // Chromium on macOS opens a new tab when clicking on the dock icon.
   // See https://github.com/microsoft/playwright/issues/9434
@@ -58,7 +78,7 @@ export async function launchApp(browserType: BrowserType, options: {
     context.on('page', async (newPage: Page) => {
       if (newPage.mainFrame().url() === 'chrome://new-tab-page/') {
         await page.bringToFront();
-        await newPage.close(serverSideCallMetadata());
+        await newPage.close();
       }
     });
   }
@@ -69,7 +89,7 @@ export async function launchApp(browserType: BrowserType, options: {
 
 async function installAppIcon(page: Page) {
   const icon = await fs.promises.readFile(require.resolve('./chromium/appIcon.png'));
-  const crPage = page._delegate as CRPage;
+  const crPage = page.delegate as CRPage;
   await crPage._mainFrameSession._client.send('Browser.setDockTile', {
     image: icon.toString('base64')
   });
@@ -79,23 +99,27 @@ export async function syncLocalStorageWithSettings(page: Page, appName: string) 
   if (isUnderTest())
     return;
   const settingsFile = path.join(registryDirectory, '.settings', `${appName}.json`);
-  await page.exposeBinding('_saveSerializedSettings', false, (_, settings) => {
-    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
-    fs.writeFileSync(settingsFile, settings);
-  });
 
-  const settings = await fs.promises.readFile(settingsFile, 'utf-8').catch(() => ('{}'));
-  await page.addInitScript(
-      `(${String((settings: any) => {
-        // iframes w/ snapshots, etc.
-        if (location && location.protocol === 'data:')
-          return;
-        if (window.top !== window)
-          return;
-        Object.entries(settings).map(([k, v]) => localStorage[k] = v);
-        (window as any).saveSettings = () => {
-          (window as any)._saveSerializedSettings(JSON.stringify({ ...localStorage }));
-        };
-      })})(${settings});
-  `);
+  const controller = new ProgressController();
+  await controller.run(async progress => {
+    await page.exposeBinding(progress, '_saveSerializedSettings', false, (_, settings) => {
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(settingsFile, settings);
+    });
+
+    const settings = await fs.promises.readFile(settingsFile, 'utf-8').catch(() => ('{}'));
+    await page.addInitScript(progress,
+        `(${String((settings: any) => {
+          // iframes w/ snapshots, etc.
+          if (location && location.protocol === 'data:')
+            return;
+          if (window.top !== window)
+            return;
+          Object.entries(settings).map(([k, v]) => localStorage[k] = v);
+          (window as any).saveSettings = () => {
+            (window as any)._saveSerializedSettings(JSON.stringify({ ...localStorage }));
+          };
+        })})(${settings});
+    `);
+  });
 }

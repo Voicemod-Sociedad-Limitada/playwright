@@ -16,14 +16,14 @@
 
 import type { TestCaseSummary, TestFileSummary } from './types';
 import * as React from 'react';
-import { hashStringToInt, msToString } from './utils';
+import { msToString } from './utils';
 import { Chip } from './chip';
-import { filterWithToken } from './filter';
-import { generateTraceUrl, Link, navigate, ProjectLink, SearchParamsContext, testResultHref } from './links';
+import { Link, LinkBadge, SearchParamsContext, testResultHref, TraceLink } from './links';
 import { statusIcon } from './statusIcon';
 import './testFileView.css';
-import { video, image, trace } from './icons';
+import { video, image } from './icons';
 import { clsx } from '@web/uiUtils';
+import { ProjectAndTagLabelsView } from './labels';
 
 export const TestFileView: React.FC<React.PropsWithChildren<{
   file: TestFileSummary;
@@ -37,7 +37,7 @@ export const TestFileView: React.FC<React.PropsWithChildren<{
     expanded={isFileExpanded(file.fileId)}
     noInsets={true}
     setExpanded={(expanded => setFileExpanded(file.fileId, expanded))}
-    header={<span>
+    header={<span className='chip-header-allow-selection'>
       {file.fileName}
     </span>}>
     {file.tests.map(test =>
@@ -51,20 +51,20 @@ export const TestFileView: React.FC<React.PropsWithChildren<{
               <Link href={testResultHref({ test }) + filterParam} title={[...test.path, test.title].join(' › ')}>
                 <span className='test-file-title'>{[...test.path, test.title].join(' › ')}</span>
               </Link>
-              {projectNames.length > 1 && !!test.projectName &&
-              <ProjectLink projectNames={projectNames} projectName={test.projectName} />}
-              <LabelsClickView labels={test.tags} />
+              <ProjectAndTagLabelsView style={{ marginLeft: '6px' }} projectNames={projectNames} activeProjectName={test.projectName} otherLabels={test.tags} />
             </span>
           </div>
           <span data-testid='test-duration' style={{ minWidth: '50px', textAlign: 'right' }}>{msToString(test.duration)}</span>
         </div>
         <div className='test-file-details-row'>
-          <Link href={testResultHref({ test })} title={[...test.path, test.title].join(' › ')} className='test-file-path-link'>
-            <span className='test-file-path'>{test.location.file}:{test.location.line}</span>
-          </Link>
-          {imageDiffBadge(test)}
-          {videoBadge(test)}
-          {traceBadge(test)}
+          <div className='test-file-details-row-items'>
+            <Link href={testResultHref({ test })} title={[...test.path, test.title].join(' › ')} className='test-file-path-link'>
+              <span className='test-file-path'>{test.location.file}:{test.location.line}</span>
+            </Link>
+            {imageDiffBadge(test)}
+            {videoBadge(test)}
+            <TraceLink test={test} dim={true} />
+          </div>
         </div>
       </div>
     )}
@@ -75,40 +75,12 @@ function imageDiffBadge(test: TestCaseSummary): JSX.Element | undefined {
   for (const result of test.results) {
     for (const attachment of result.attachments) {
       if (attachment.contentType.startsWith('image/') && !!attachment.name.match(/-(expected|actual|diff)/))
-        return <Link href={testResultHref({ test, result, anchor: `attachment-${result.attachments.indexOf(attachment)}` })} title='View images' className='test-file-badge'>{image()}</Link>;
+        return <LinkBadge href={testResultHref({ test, result, anchor: `attachment-${result.attachments.indexOf(attachment)}` })} title='View images' dim={true}>{image()}</LinkBadge>;
     }
   }
 }
 
 function videoBadge(test: TestCaseSummary): JSX.Element | undefined {
   const resultWithVideo = test.results.find(result => result.attachments.some(attachment => attachment.name === 'video'));
-  return resultWithVideo ? <Link href={testResultHref({ test, result: resultWithVideo, anchor: 'attachment-video' })}  title='View video' className='test-file-badge'>{video()}</Link> : undefined;
+  return resultWithVideo ? <LinkBadge href={testResultHref({ test, result: resultWithVideo, anchor: 'attachment-video' })} title='View video' dim={true}>{video()}</LinkBadge> : undefined;
 }
-
-function traceBadge(test: TestCaseSummary): JSX.Element | undefined {
-  const firstTraces = test.results.map(result => result.attachments.filter(attachment => attachment.name === 'trace')).filter(traces => traces.length > 0)[0];
-  return firstTraces ? <Link href={generateTraceUrl(firstTraces)} title='View trace' className='test-file-badge'>{trace()}</Link> : undefined;
-}
-
-const LabelsClickView: React.FC<React.PropsWithChildren<{
-  labels: string[],
-}>> = ({ labels }) => {
-  const searchParams = React.useContext(SearchParamsContext);
-
-  const onClickHandle = (e: React.MouseEvent, label: string) => {
-    e.preventDefault();
-    const q = searchParams.get('q')?.toString() || '';
-    const tokens = q.split(' ');
-    navigate(filterWithToken(tokens, label, e.metaKey || e.ctrlKey));
-  };
-
-  return labels.length > 0 ? (
-    <>
-      {labels.map(label => (
-        <span key={label} style={{ margin: '6px 0 0 6px', cursor: 'pointer' }} className={clsx('label', 'label-color-' + hashStringToInt(label))} onClick={e => onClickHandle(e, label)}>
-          {label.slice(1)}
-        </span>
-      ))}
-    </>
-  ) : null;
-};

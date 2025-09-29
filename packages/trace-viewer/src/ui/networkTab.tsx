@@ -94,6 +94,7 @@ export const NetworkTab: React.FunctionComponent<{
 
   const grid = <NetworkGridView
     name='network'
+    ariaLabel='Network requests'
     items={renderedEntries}
     selectedItem={selectedEntry}
     onSelected={item => setSelectedEntry(item)}
@@ -268,6 +269,8 @@ const renderEntry = (resource: Entry, boundaries: Boundaries, contextIdGenerator
     resourceName = url.pathname.substring(url.pathname.lastIndexOf('/') + 1);
     if (!resourceName)
       resourceName = url.host;
+    if (url.search)
+      resourceName += url.search;
   } catch {
     resourceName = resource.request.url;
   }

@@ -16,22 +16,30 @@
 
 import os from 'os';
 import path from 'path';
-import { assert, wrapInASCIIBox } from '../../utils';
-import type { Env } from '../../utils/processLauncher';
-import type { BrowserOptions } from '../browser';
-import { BrowserReadyState, BrowserType, kNoXServerRunningError } from '../browserType';
-import type { SdkObject } from '../instrumentation';
-import type { ProtocolError } from '../protocolError';
-import type { ConnectionTransport } from '../transport';
-import type * as types from '../types';
+
+import { wrapInASCIIBox } from '../utils/ascii';
+import { BrowserType, kNoXServerRunningError } from '../browserType';
 import { BidiBrowser } from './bidiBrowser';
 import { kBrowserCloseMessageId } from './bidiConnection';
 import { createProfile } from './third_party/firefoxPrefs';
+import { ManualPromise } from '../../utils/isomorphic/manualPromise';
+
+import type { BrowserOptions } from '../browser';
+import type { SdkObject } from '../instrumentation';
+import type { Env } from '../utils/processLauncher';
+import type { ProtocolError } from '../protocolError';
+import type { ConnectionTransport } from '../transport';
+import type * as types from '../types';
+import type { RecentLogsCollector } from '../utils/debugLogger';
+
 
 export class BidiFirefox extends BrowserType {
   constructor(parent: SdkObject) {
-    super(parent, 'bidi');
-    this._useBidi = true;
+    super(parent, '_bidiFirefox');
+  }
+
+  override executablePath(): string {
+    return '';
   }
 
   override async connectToTransport(transport: ConnectionTransport, options: BrowserOptions): Promise<BidiBrowser> {
@@ -49,7 +57,7 @@ export class BidiFirefox extends BrowserType {
     return error;
   }
 
-  override amendEnvironment(env: Env, userDataDir: string, executable: string, browserArguments: string[]): Env {
+  override amendEnvironment(env: Env): Env {
     if (!path.isAbsolute(os.homedir()))
       throw new Error(`Cannot launch Firefox with relative home directory. Did you set ${os.platform() === 'win32' ? 'USERPROFILE' : 'HOME'} to a relative path?`);
 
@@ -70,7 +78,12 @@ export class BidiFirefox extends BrowserType {
   }
 
   override attemptToGracefullyCloseBrowser(transport: ConnectionTransport): void {
+    // Note that it's fine to reuse the transport, since our connection ignores kBrowserCloseMessageId.
     transport.send({ method: 'browser.close', params: {}, id: kBrowserCloseMessageId });
+  }
+
+  override supportsPipeTransport(): boolean {
+    return false;
   }
 
   override async prepareUserDataDir(options: types.LaunchOptions, userDataDir: string): Promise<void> {
@@ -95,17 +108,13 @@ export class BidiFirefox extends BrowserType {
     return firefoxArguments;
   }
 
-  override readyState(options: types.LaunchOptions): BrowserReadyState | undefined {
-    assert(options.useWebSocket);
-    return new FirefoxReadyState();
-  }
-}
-
-class FirefoxReadyState extends BrowserReadyState {
-  override onBrowserOutput(message: string): void {
-    // Bidi WebSocket in Firefox.
-    const match = message.match(/WebDriver BiDi listening on (ws:\/\/.*)$/);
-    if (match)
-      this._wsEndpoint.resolve(match[1] + '/session');
+  override async waitForReadyState(options: types.LaunchOptions, browserLogsCollector: RecentLogsCollector): Promise<{ wsEndpoint?: string }> {
+    const result = new ManualPromise<{ wsEndpoint?: string }>();
+    browserLogsCollector.onMessage(message => {
+      const match = message.match(/WebDriver BiDi listening on (ws:\/\/.*)$/);
+      if (match)
+        result.resolve({ wsEndpoint: match[1] + '/session' });
+    });
+    return result;
   }
 }

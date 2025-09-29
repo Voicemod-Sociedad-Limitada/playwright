@@ -67,7 +67,8 @@ test('should include custom expect message with web-first assertions', async ({ 
   expect(result.passed).toBe(0);
 
   expect(result.output).toContain('Error: x-foo must be visible');
-  expect(result.output).toContain(`Timed out 1ms waiting for expect(locator).toBeVisible()`);
+  expect(result.output).toContain('expect(locator).toBeVisible() failed');
+  expect(result.output).toContain('Timeout:  1ms');
   expect(result.output).toContain('Call log:');
 });
 
@@ -543,11 +544,33 @@ test('should respect expect.timeout', async ({ runInlineTest }) => {
     'playwright.config.js': `module.exports = { expect: { timeout: 1000 } }`,
     'a.test.ts': `
       import { test, expect } from '@playwright/test';
+      import { stripVTControlCharacters } from 'node:util';
 
       test('timeout', async ({ page }) => {
         await page.goto('data:text/html,<div>A</div>');
         const error = await expect(page).toHaveURL('data:text/html,<div>B</div>').catch(e => e);
-        expect(error.message).toContain('expect.toHaveURL with timeout 1000ms');
+        expect(stripVTControlCharacters(error.message)).toContain('expect(page).toHaveURL(expected) failed');
+        expect(stripVTControlCharacters(error.message)).toContain('Timeout: 1000ms');
+        expect(error.message).toContain('data:text/html,<div>');
+      });
+      `,
+  }, { workers: 1 });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+});
+
+test('should support toHaveURL predicate', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.js': `module.exports = { expect: { timeout: 1000 } }`,
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+      import { stripVTControlCharacters } from 'node:util';
+
+      test('predicate', async ({ page }) => {
+        await page.goto('data:text/html,<div>A</div>');
+        const error = await expect(page).toHaveURL(url => url === 'data:text/html,<div>B</div>').catch(e => e);
+        expect(stripVTControlCharacters(error.message)).toContain('expect(page).toHaveURL(expected) failed');
+        expect(stripVTControlCharacters(error.message)).toContain('Timeout: 1000ms');
         expect(error.message).toContain('data:text/html,<div>');
       });
       `,
@@ -686,7 +709,7 @@ test('should not print timed out error message when test times out', async ({ ru
   expect(result.exitCode).toBe(1);
   const output = result.output;
   expect(output).toContain('Test timeout of 3000ms exceeded');
-  expect(output).not.toContain('Timed out 5000ms waiting for expect');
+  expect(output).not.toContain('Timeout:  5000ms');
   expect(output).toContain(`Error: expect(locator).toHaveText(expected)`);
 });
 
@@ -742,11 +765,16 @@ test('should chain expect matchers and expose matcher utils (TSC)', async ({ run
         let pass: boolean;
         let matcherResult: any;
         try {
-          await baseExpect(baseAmount).toHaveAttribute('data-amount', expected, options);
+          const expectation = this.isNot ? baseExpect(baseAmount).not : baseExpect(baseAmount);
+          await expectation.toHaveAttribute('data-amount', expected, options);
           pass = true;
         } catch (e: any) {
           matcherResult = e.matcherResult;
           pass = false;
+        }
+
+        if (this.isNot) {
+            pass = !pass;
         }
 
         const expectOptions = {
@@ -822,11 +850,16 @@ test('should chain expect matchers and expose matcher utils', async ({ runInline
         let pass: boolean;
         let matcherResult: any;
         try {
-          await baseExpect(baseAmount).toHaveAttribute('data-amount', expected, options);
+          const expectation = this.isNot ? baseExpect(baseAmount).not : baseExpect(baseAmount);
+          await expectation.toHaveAttribute('data-amount', expected, options);
           pass = true;
         } catch (e: any) {
           matcherResult = e.matcherResult;
           pass = false;
+        }
+
+        if (this.isNot) {
+            pass = !pass;
         }
 
         const expectOptions = {
@@ -868,7 +901,7 @@ test('should chain expect matchers and expose matcher utils', async ({ runInline
   }, { workers: 1 });
   const output = stripAnsi(result.output);
   expect(output).toContain(`await expect(page.locator('div')).toHaveAmount('3', { timeout: 1000 });`);
-  expect(output).toContain('a.spec.ts:60');
+  expect(output).toContain('a.spec.ts:65');
   expect(result.failed).toBe(1);
   expect(result.exitCode).toBe(1);
 });
@@ -990,7 +1023,8 @@ test('should respect timeout from configured expect when used outside of the tes
 
   expect(code).toBe(1);
   expect(stdout).toBe('');
-  expect(stripAnsi(stderr)).toContain('Timed out 10ms waiting for expect(locator).toBeAttached()');
+  expect(stripAnsi(stderr)).toContain('expect(locator).toBeAttached() failed');
+  expect(stripAnsi(stderr)).toContain('Timeout:  10ms');
 });
 
 test('should expose timeout to custom matchers', async ({ runInlineTest, runTSC }) => {
@@ -1165,4 +1199,105 @@ test('custom asymmetric matchers should work with expect.extend', async ({ runIn
   expect(result.exitCode).toBe(0);
   expect(result.passed).toBe(1);
   expect(result.output).not.toContain('should not run');
+});
+
+test('custom asymmetric matchers should function', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/35138' } }, async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      expect.extend({
+        isUndefined(received: unknown, expected: string) {
+          return { pass: received === undefined, message: () => '' };
+        }
+      });
+      test('example', () => {
+        expect(undefined).toEqual(expect.isUndefined());
+      });
+      test('example2', () => {
+        expect({
+          aProperty: undefined,
+          bProperty: 'foo',
+        }).toEqual({
+          aProperty: expect.isUndefined(),
+          bProperty: 'foo',
+          cProperty: expect.isUndefined(),
+        });
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(2);
+});
+
+test('single custom asymmetric matcher should present the correct error', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/35138' } }, async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      expect.extend({
+        isUndefined(received: unknown, expected: string) {
+          return { pass: received === undefined, message: () => '' };
+        }
+      });
+      test('example', () => {
+        expect({
+          aProperty: 'foo'
+        }).toEqual({
+          aProperty: expect.isUndefined()
+        });
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.passed).toBe(0);
+  expect(result.output).toContain('-   \"aProperty\": isUndefined<>');
+  expect(result.output).toContain('+   \"aProperty\": \"foo\"');
+});
+
+test('multiple custom asymmetric matchers should present the correct error', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/35138' } }, async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      expect.extend({
+        isUndefined(received: unknown, expected: string) {
+          return { pass: received === undefined, message: () => '' };
+        }
+      });
+      test('example', () => {
+        expect({
+          aProperty: undefined,
+          bProperty: 'foo',
+        }).toEqual({
+          aProperty: expect.isUndefined(),
+          bProperty: expect.isUndefined()
+        });
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.passed).toBe(0);
+  expect(result.output).toContain('-   \"bProperty\": isUndefined<>');
+  expect(result.output).toContain('+   \"bProperty\": \"foo\"');
+});
+
+test('multiple custom asymmetric matchers in async expect should present the correct error', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/35138' } }, async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'expect-test.spec.ts': `
+      import { test, expect } from '@playwright/test';
+      expect.extend({
+        isUndefined(received: unknown, expected: string) {
+          return { pass: received === undefined, message: () => '' };
+        }
+      });
+      test('example', async () => {
+        await expect.poll(() => ({ aProperty: 'foo', bProperty: undefined })).toEqual({
+          aProperty: expect.isUndefined(),
+          bProperty: expect.isUndefined(),
+        });
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.passed).toBe(0);
+  expect(result.output).toContain('-   \"aProperty\": isUndefined<>');
+  expect(result.output).toContain('+   \"aProperty\": \"foo\"');
 });

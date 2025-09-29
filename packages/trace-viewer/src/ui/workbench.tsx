@@ -20,7 +20,6 @@ import { ActionList } from './actionList';
 import { CallTab } from './callTab';
 import { LogTab } from './logTab';
 import { ErrorsTab, useErrorsTabModel } from './errorsTab';
-import type { ErrorDescription } from './errorsTab';
 import type { ConsoleEntry } from './consoleTab';
 import { ConsoleTab, useConsoleTabModel } from './consoleTab';
 import type * as modelUtil from './modelUtil';
@@ -43,6 +42,9 @@ import { testStatusIcon, testStatusText } from './testUtils';
 import type { UITestStatus } from './testUtils';
 import type { AfterActionTraceEventAttachment } from '@trace/trace';
 import type { HighlightedElement } from './snapshotTab';
+import type { TestAnnotation } from '@playwright/test';
+import { MetadataWithCommitInfo } from '@testIsomorphic/types';
+import type { ActionGroup } from '@isomorphic/protocolFormatter';
 
 export const Workbench: React.FunctionComponent<{
   model?: modelUtil.MultiTraceModel,
@@ -52,13 +54,14 @@ export const Workbench: React.FunctionComponent<{
   isLive?: boolean,
   hideTimeline?: boolean,
   status?: UITestStatus,
-  annotations?: { type: string; description?: string; }[];
+  annotations?: TestAnnotation[];
   inert?: boolean,
   onOpenExternally?: (location: modelUtil.SourceLocation) => void,
   revealSource?: boolean,
-}> = ({ model, showSourcesFirst, rootDir, fallbackLocation, isLive, hideTimeline, status, annotations, inert, onOpenExternally, revealSource }) => {
+  testRunMetadata?: MetadataWithCommitInfo,
+}> = ({ model, showSourcesFirst, rootDir, fallbackLocation, isLive, hideTimeline, status, annotations, inert, onOpenExternally, revealSource, testRunMetadata }) => {
   const [selectedCallId, setSelectedCallId] = React.useState<string | undefined>(undefined);
-  const [revealedError, setRevealedError] = React.useState<ErrorDescription | undefined>(undefined);
+  const [revealedError, setRevealedError] = React.useState<modelUtil.ErrorDescription | undefined>(undefined);
   const [revealedAttachment, setRevealedAttachment] = React.useState<[attachment: AfterActionTraceEventAttachment, renderCounter: number] | undefined>(undefined);
   const [highlightedCallId, setHighlightedCallId] = React.useState<string | undefined>();
   const [highlightedEntry, setHighlightedEntry] = React.useState<Entry | undefined>();
@@ -69,15 +72,18 @@ export const Workbench: React.FunctionComponent<{
   const [highlightedElement, setHighlightedElement] = React.useState<HighlightedElement>({ lastEdited: 'none' });
   const [selectedTime, setSelectedTime] = React.useState<Boundaries | undefined>();
   const [sidebarLocation, setSidebarLocation] = useSetting<'bottom' | 'right'>('propertiesSidebarLocation', 'bottom');
+  const [actionsFilter] = useSetting<ActionGroup[]>('actionsFilter', []);
 
   const setSelectedAction = React.useCallback((action: modelUtil.ActionTraceEventInContext | undefined) => {
     setSelectedCallId(action?.callId);
     setRevealedError(undefined);
   }, []);
 
+  const actions = React.useMemo(() => model?.filteredActions(actionsFilter), [model, actionsFilter]);
+
   const highlightedAction = React.useMemo(() => {
-    return model?.actions.find(a => a.callId === highlightedCallId);
-  }, [model, highlightedCallId]);
+    return actions?.find(a => a.callId === highlightedCallId);
+  }, [actions, highlightedCallId]);
 
   const setHighlightedAction = React.useCallback((highlightedAction: modelUtil.ActionTraceEventInContext | undefined) => {
     setHighlightedCallId(highlightedAction?.callId);
@@ -92,7 +98,7 @@ export const Workbench: React.FunctionComponent<{
 
   const selectedAction = React.useMemo(() => {
     if (selectedCallId) {
-      const action = model?.actions.find(a => a.callId === selectedCallId);
+      const action = actions?.find(a => a.callId === selectedCallId);
       if (action)
         return action;
     }
@@ -101,18 +107,18 @@ export const Workbench: React.FunctionComponent<{
     if (failedAction)
       return failedAction;
 
-    if (model?.actions.length) {
+    if (actions?.length) {
       // Select the last non-after hooks item.
-      let index = model.actions.length - 1;
-      for (let i = 0; i < model.actions.length; ++i) {
-        if (model.actions[i].apiName === 'After Hooks' && i) {
+      let index = actions.length - 1;
+      for (let i = 0; i < actions.length; ++i) {
+        if (actions[i].title === 'After Hooks' && i) {
           index = i - 1;
           break;
         }
       }
-      return model.actions[index];
+      return actions[index];
     }
-  }, [model, selectedCallId]);
+  }, [model, actions, selectedCallId]);
 
   const activeAction = React.useMemo(() => {
     return highlightedAction || selectedAction;
@@ -164,9 +170,6 @@ export const Workbench: React.FunctionComponent<{
   const consoleModel = useConsoleTabModel(model, selectedTime);
   const networkModel = useNetworkTabModel(model, selectedTime);
   const errorsModel = useErrorsTabModel(model);
-  const attachments = React.useMemo(() => {
-    return model?.actions.map(a => a.attachments || []).flat() || [];
-  }, [model]);
 
   const sdkLanguage = model?.sdkLanguage || 'javascript';
 
@@ -193,13 +196,13 @@ export const Workbench: React.FunctionComponent<{
     id: 'errors',
     title: 'Errors',
     errorCount: errorsModel.errors.size,
-    render: () => <ErrorsTab errorsModel={errorsModel} sdkLanguage={sdkLanguage} revealInSource={error => {
+    render: () => <ErrorsTab errorsModel={errorsModel} model={model} testRunMetadata={testRunMetadata} sdkLanguage={sdkLanguage} revealInSource={error => {
       if (error.action)
         setSelectedAction(error.action);
       else
         setRevealedError(error);
       selectPropertiesTab('source');
-    }} />
+    }} wallTime={model?.wallTime ?? 0} />
   };
 
   // Fallback location w/o action stands for file / test.
@@ -242,7 +245,7 @@ export const Workbench: React.FunctionComponent<{
   const attachmentsTab: TabbedPaneTabModel = {
     id: 'attachments',
     title: 'Attachments',
-    count: attachments.length,
+    count: model?.visibleAttachments.length,
     render: () => <AttachmentsTab model={model} revealedAttachment={revealedAttachment} />
   };
 
@@ -302,7 +305,7 @@ export const Workbench: React.FunctionComponent<{
       </div>}
       <ActionList
         sdkLanguage={sdkLanguage}
-        actions={model?.actions || []}
+        actions={actions || []}
         selectedAction={model ? selectedAction : undefined}
         selectedTime={selectedTime}
         setSelectedTime={setSelectedTime}

@@ -18,13 +18,11 @@ import type { FilteredStats, TestCase, TestCaseSummary, TestFile, TestFileSummar
 import * as React from 'react';
 import './colors.css';
 import './common.css';
-import { Filter } from './filter';
-import { HeaderView } from './headerView';
-import { Route, SearchParamsContext } from './links';
+import { Filter, filterWithQuery } from './filter';
+import { HeaderView, GlobalFilterView } from './headerView';
+import { navigate, Route, SearchParamsContext, testResultHref } from './links';
 import type { LoadedReport } from './loadedReport';
 import './reportView.css';
-import type { Metainfo } from './metadataView';
-import { MetadataView } from './metadataView';
 import { TestCaseView } from './testCaseView';
 import { TestFilesHeader, TestFilesView } from './testFilesView';
 import './theme.css';
@@ -50,6 +48,11 @@ export const ReportView: React.FC<{
   const searchParams = React.useContext(SearchParamsContext);
   const [expandedFiles, setExpandedFiles] = React.useState<Map<string, boolean>>(new Map());
   const [filterText, setFilterText] = React.useState(searchParams.get('q') || '');
+  const [metadataVisible, setMetadataVisible] = React.useState(false);
+  const testId = searchParams.get('testId');
+  const q = searchParams.get('q')?.toString() || '';
+  const filterParam = q ? '&q=' + q : '';
+  const reportTitle = report?.json()?.title;
 
   const testIdToFileIdMap = React.useMemo(() => {
     const map = new Map<string, string>();
@@ -62,7 +65,7 @@ export const ReportView: React.FC<{
 
   const filter = React.useMemo(() => Filter.parse(filterText), [filterText]);
   const filteredStats = React.useMemo(() => filter.empty() ? undefined : computeStats(report?.json().files || [], filter), [report, filter]);
-  const filteredTests = React.useMemo(() => {
+  const testModel = React.useMemo(() => {
     const result: TestModelSummary = { files: [], tests: [] };
     for (const file of report?.json().files || []) {
       const tests = file.tests.filter(t => filter.matches(t));
@@ -73,21 +76,71 @@ export const ReportView: React.FC<{
     return result;
   }, [report, filter]);
 
+  const { prev, next } = React.useMemo(() => {
+    const index = testModel.tests.findIndex(t => t.testId === testId);
+    const prev = index > 0 ? testModel.tests[index - 1] : undefined;
+    const next = index < testModel.tests.length - 1 ? testModel.tests[index + 1] : undefined;
+    return { prev, next };
+  }, [testId, testModel]);
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey)
+        return;
+
+      switch (event.key) {
+        case 'a':
+          event.preventDefault();
+          navigate('#?');
+          break;
+        case 'p':
+          event.preventDefault();
+          navigate(filterWithQuery(q, 's:passed', false));
+          break;
+        case 'f':
+          event.preventDefault();
+          navigate(filterWithQuery(q, 's:failed', false));
+          break;
+        case 'ArrowLeft':
+          if (prev) {
+            event.preventDefault();
+            navigate(testResultHref({ test: prev }) + filterParam);
+          }
+          break;
+        case 'ArrowRight':
+          if (next) {
+            event.preventDefault();
+            navigate(testResultHref({ test: next }) + filterParam);
+          }
+          break;
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [prev, next, filterParam, q]);
+
+  React.useEffect(() => {
+    if (reportTitle)
+      document.title = reportTitle;
+    else
+      document.title = 'Playwright Test Report';
+  }, [reportTitle]);
+
   return <div className='htmlreport vbox px-4 pb-4'>
     <main>
-      {report?.json() && <HeaderView stats={report.json().stats} filterText={filterText} setFilterText={setFilterText}></HeaderView>}
-      {report?.json().metadata && <MetadataView {...report?.json().metadata as Metainfo} />}
+      {report?.json() && <GlobalFilterView stats={report.json().stats} filterText={filterText} setFilterText={setFilterText} />}
       <Route predicate={testFilesRoutePredicate}>
-        <TestFilesHeader report={report?.json()} filteredStats={filteredStats} />
+        <TestFilesHeader report={report?.json()} filteredStats={filteredStats} metadataVisible={metadataVisible} toggleMetadataVisible={() => setMetadataVisible(visible => !visible)}/>
         <TestFilesView
-          tests={filteredTests.files}
+          tests={testModel.files}
           expandedFiles={expandedFiles}
           setExpandedFiles={setExpandedFiles}
           projectNames={report?.json().projectNames || []}
         />
       </Route>
       <Route predicate={testCaseRoutePredicate}>
-        {!!report && <TestCaseViewLoader report={report} tests={filteredTests.tests} testIdToFileIdMap={testIdToFileIdMap} />}
+        {!!report && <TestCaseViewLoader report={report} next={next} prev={prev} testId={testId} testIdToFileIdMap={testIdToFileIdMap} />}
       </Route>
     </main>
   </div>;
@@ -95,45 +148,49 @@ export const ReportView: React.FC<{
 
 const TestCaseViewLoader: React.FC<{
   report: LoadedReport,
-  tests: TestCaseSummary[],
+  testId: string | null,
+  next?: TestCaseSummary,
+  prev?: TestCaseSummary,
   testIdToFileIdMap: Map<string, string>,
-}> = ({ report, testIdToFileIdMap, tests }) => {
+}> = ({ report, testIdToFileIdMap, next, prev, testId }) => {
   const searchParams = React.useContext(SearchParamsContext);
-  const [test, setTest] = React.useState<TestCase | undefined>();
-  const testId = searchParams.get('testId');
+  const [test, setTest] = React.useState<TestCase | 'loading' | 'not-found'>('loading');
   const run = +(searchParams.get('run') || '0');
-
-  const { prev, next } = React.useMemo(() => {
-    const index = tests.findIndex(t => t.testId === testId);
-    const prev = index > 0 ? tests[index - 1] : undefined;
-    const next = index < tests.length - 1 ? tests[index + 1] : undefined;
-    return { prev, next };
-  }, [testId, tests]);
 
   React.useEffect(() => {
     (async () => {
-      if (!testId || testId === test?.testId)
+      if (!testId || (typeof test === 'object' && testId === test.testId))
         return;
       const fileId = testIdToFileIdMap.get(testId);
-      if (!fileId)
+      if (!fileId) {
+        setTest('not-found');
         return;
-      const file = await report.entry(`${fileId}.json`) as TestFile;
-      for (const t of file.tests) {
-        if (t.testId === testId) {
-          setTest(t);
-          break;
-        }
       }
+      const file = await report.entry(`${fileId}.json`) as TestFile;
+      setTest(file?.tests.find(t => t.testId === testId) || 'not-found');
     })();
   }, [test, report, testId, testIdToFileIdMap]);
 
-  return <TestCaseView
-    projectNames={report.json().projectNames}
-    next={next}
-    prev={prev}
-    test={test}
-    run={run}
-  />;
+  if (test === 'loading')
+    return <div className='test-case-column'></div>;
+
+  if (test === 'not-found') {
+    return <div className='test-case-column'>
+      <HeaderView title='Test not found' />
+      <div className='test-case-location'>Test ID: {testId}</div>
+    </div>;
+  }
+
+  return <div className='test-case-column'>
+    <TestCaseView
+      projectNames={report.json().projectNames}
+      testRunMetadata={report.json().metadata}
+      next={next}
+      prev={prev}
+      test={test}
+      run={run}
+    />
+  </div>;
 };
 
 function computeStats(files: TestFileSummary[], filter: Filter): FilteredStats {

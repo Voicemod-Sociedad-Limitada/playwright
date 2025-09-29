@@ -36,11 +36,13 @@ document.head.appendChild(link);
 const ReportLoader: React.FC = () => {
   const [report, setReport] = React.useState<LoadedReport | undefined>();
   React.useEffect(() => {
-    if (report)
-      return;
     const zipReport = new ZipReport();
-    zipReport.load().then(() => setReport(zipReport));
-  }, [report]);
+    zipReport.load().then(() => {
+      // Drop node after consumption
+      document.getElementById('playwrightReportBase64')?.remove();
+      setReport(zipReport);
+    });
+  }, []);
   return <SearchParamsProvider>
     <ReportView report={report} />
   </SearchParamsProvider>;
@@ -58,15 +60,18 @@ class ZipReport implements LoadedReport {
 
   async load() {
     const zipURI = await new Promise<string>(resolve => {
-      if (window.playwrightReportBase64)
-        return resolve(window.playwrightReportBase64);
+      const element = document.getElementById('playwrightReportBase64');
+      if (!!element?.textContent)
+        return resolve(element.textContent);
       if (window.opener) {
-        window.addEventListener('message', event => {
+        const listener = (event: MessageEvent) => {
           if (event.source === window.opener) {
             localStorage.setItem(kPlaywrightReportStorageForHMR, event.data);
             resolve(event.data);
+            window.removeEventListener('message', listener);
           }
-        }, { once: true });
+        };
+        window.addEventListener('message', listener);
         window.opener.postMessage('ready', '*');
       } else {
         const oldReport = localStorage.getItem(kPlaywrightReportStorageForHMR);

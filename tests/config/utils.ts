@@ -15,7 +15,7 @@
  */
 
 import type { Frame, Page } from 'playwright-core';
-import { ZipFile } from '../../packages/playwright-core/lib/utils/zipFile';
+import { ZipFile } from '../../packages/playwright-core/lib/server/utils/zipFile';
 import type { TraceModelBackend } from '../../packages/trace-viewer/src/sw/traceModel';
 import type { StackFrame } from '../../packages/protocol/src/channels';
 import { parseClientSideCallMetadata } from '../../packages/playwright-core/lib/utils/isomorphic/traceUtils';
@@ -24,6 +24,7 @@ import type { ActionTreeItem } from '../../packages/trace-viewer/src/ui/modelUti
 import { buildActionTree, MultiTraceModel } from '../../packages/trace-viewer/src/ui/modelUtil';
 import type { ActionTraceEvent, ConsoleMessageTraceEvent, EventTraceEvent, TraceEvent } from '@trace/trace';
 import style from 'ansi-styles';
+import { renderTitleForCall } from '../../packages/playwright-core/lib/utils/isomorphic/protocolFormatter';
 
 export async function attachFrame(page: Page, frameId: string, url: string): Promise<Frame> {
   const handle = await page.evaluateHandle(async ({ frameId, url }) => {
@@ -151,29 +152,31 @@ export async function parseTraceRaw(file: string): Promise<{ events: any[], reso
   return {
     events,
     resources,
-    actions: actionObjects.map(a => a.apiName),
+    actions: actionObjects.map(a => renderTitleForCall({ ...a, type: a.class })),
     actionObjects,
     stacks,
   };
 }
 
-export async function parseTrace(file: string): Promise<{ resources: Map<string, Buffer>, events: (EventTraceEvent | ConsoleMessageTraceEvent)[], actions: ActionTraceEvent[], apiNames: string[], traceModel: TraceModel, model: MultiTraceModel, actionTree: string[], errors: string[] }> {
+export async function parseTrace(file: string): Promise<{ resources: Map<string, Buffer>, events: (EventTraceEvent | ConsoleMessageTraceEvent)[], actions: ActionTraceEvent[], titles: string[], traceModel: TraceModel, model: MultiTraceModel, actionTree: string[], errors: string[] }> {
   const backend = new TraceBackend(file);
   const traceModel = new TraceModel();
   await traceModel.load(backend, () => {});
   const model = new MultiTraceModel(traceModel.contextEntries);
-  const { rootItem } = buildActionTree(model.actions);
+  const actions = model.filteredActions([]);
+  const { rootItem } = buildActionTree(actions);
   const actionTree: string[] = [];
   const visit = (actionItem: ActionTreeItem, indent: string) => {
-    actionTree.push(`${indent}${actionItem.action?.apiName || actionItem.id}`);
+    const title = renderTitleForCall({ ...actionItem.action, type: actionItem.action.class });
+    actionTree.push(`${indent}${title || actionItem.id}`);
     for (const child of actionItem.children)
       visit(child, indent + '  ');
   };
   rootItem.children.forEach(a => visit(a, ''));
   return {
-    apiNames: model.actions.map(a => a.apiName),
+    titles: actions.map(a => renderTitleForCall({ ...a, type: a.class })),
     resources: backend.entries,
-    actions: model.actions,
+    actions,
     events: model.events,
     errors: model.errors.map(e => e.message),
     model,

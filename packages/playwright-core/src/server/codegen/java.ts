@@ -14,14 +14,15 @@
  * limitations under the License.
  */
 
-import type { BrowserContextOptions } from '../../../types/types';
-import type * as types from '../types';
-import type * as actions from '@recorder/actions';
-import type { Language, LanguageGenerator, LanguageGeneratorOptions } from './types';
 import { toClickOptionsForSourceCode, toKeyboardModifiers, toSignalMap } from './language';
 import { deviceDescriptors } from '../deviceDescriptors';
 import { JavaScriptFormatter } from './javascript';
-import { escapeWithQuotes, asLocator } from '../../utils';
+import { asLocator, escapeWithQuotes } from '../../utils';
+
+import type { BrowserContextOptions } from '../../../types/types';
+import type * as types from '../types';
+import type { Language, LanguageGenerator, LanguageGeneratorOptions } from './types';
+import type * as actions from '@recorder/actions';
 
 type JavaLanguageMode = 'library' | 'junit';
 
@@ -134,7 +135,7 @@ export class JavaLanguageGenerator implements LanguageGenerator {
         return `assertThat(${subject}.${this._asLocator(action.selector, inFrameLocator)}).${assertion};`;
       }
       case 'assertSnapshot':
-        return `assertThat(${subject}.${this._asLocator(action.selector, inFrameLocator)}).matchesAriaSnapshot(${quote(action.snapshot)});`;
+        return `assertThat(${subject}.${this._asLocator(action.selector, inFrameLocator)}).matchesAriaSnapshot(${quote(action.ariaSnapshot)});`;
     }
   }
 

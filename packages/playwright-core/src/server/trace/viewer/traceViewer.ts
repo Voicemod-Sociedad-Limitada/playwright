@@ -14,19 +14,21 @@
  * limitations under the License.
  */
 
-import path from 'path';
 import fs from 'fs';
-import { HttpServer } from '../../../utils/httpServer';
-import type { Transport } from '../../../utils/httpServer';
-import { gracefullyProcessExitDoNotHang, isUnderTest } from '../../../utils';
+import path from 'path';
+
+import { gracefullyProcessExitDoNotHang } from '../../../utils';
+import { isUnderTest } from '../../../utils';
+import { HttpServer } from '../../utils/httpServer';
+import { open } from '../../../utilsBundle';
 import { syncLocalStorageWithSettings } from '../../launchApp';
-import { serverSideCallMetadata } from '../../instrumentation';
+import { launchApp } from '../../launchApp';
 import { createPlaywright } from '../../playwright';
 import { ProgressController } from '../../progress';
-import { open } from '../../../utilsBundle';
-import type { Page } from '../../page';
+
+import type { Transport } from '../../utils/httpServer';
 import type { BrowserType } from '../../browserType';
-import { launchApp } from '../../launchApp';
+import type { Page } from '../../page';
 
 export type TraceViewerServerOptions = {
   host?: string;
@@ -67,6 +69,10 @@ export async function startTraceViewerServer(options?: TraceViewerServerOptions)
   server.routePrefix('/trace', (request, response) => {
     const url = new URL('http://localhost' + request.url!);
     const relativePath = url.pathname.slice('/trace'.length);
+    if (process.env.PW_HMR) {
+      // When running in Vite HMR mode, port is hardcoded in build.js
+      response.appendHeader('Access-Control-Allow-Origin', 'http://localhost:44223');
+    }
     if (relativePath.endsWith('/stall.js'))
       return true;
     if (relativePath.startsWith('/file')) {
@@ -162,32 +168,33 @@ export async function openTraceViewerApp(url: string, browserName: string, optio
   const traceViewerBrowser = isUnderTest() ? 'chromium' : browserName;
 
   const { context, page } = await launchApp(traceViewerPlaywright[traceViewerBrowser as 'chromium'], {
-    // TODO: store language in the trace.
     sdkLanguage: traceViewerPlaywright.options.sdkLanguage,
     windowSize: { width: 1280, height: 800 },
     persistentContextOptions: {
       ...options?.persistentContextOptions,
-      useWebSocket: isUnderTest(),
+      cdpPort: isUnderTest() ? 0 : undefined,
       headless: !!options?.headless,
       colorScheme: isUnderTest() ? 'light' : undefined,
     },
   });
 
-  const controller = new ProgressController(serverSideCallMetadata(), context._browser);
+  const controller = new ProgressController();
   await controller.run(async progress => {
     await context._browser._defaultContext!._loadDefaultContextAsIs(progress);
+
+    if (process.env.PWTEST_PRINT_WS_ENDPOINT) {
+      // eslint-disable-next-line no-restricted-properties
+      process.stderr.write('DevTools listening on: ' + context._browser.options.wsEndpoint + '\n');
+    }
+
+    if (!isUnderTest())
+      await syncLocalStorageWithSettings(page, 'traceviewer');
+
+    if (isUnderTest())
+      page.on('close', () => context.close({ reason: 'Trace viewer closed' }).catch(() => {}));
+
+    await page.mainFrame().goto(progress, url);
   });
-
-  if (process.env.PWTEST_PRINT_WS_ENDPOINT)
-    process.stderr.write('DevTools listening on: ' + context._browser.options.wsEndpoint + '\n');
-
-  if (!isUnderTest())
-    await syncLocalStorageWithSettings(page, 'traceviewer');
-
-  if (isUnderTest())
-    page.on('close', () => context.close({ reason: 'Trace viewer closed' }).catch(() => {}));
-
-  await page.mainFrame().goto(serverSideCallMetadata(), url);
   return page;
 }
 

@@ -14,22 +14,25 @@
  * limitations under the License.
  */
 
-import type * as channels from '@protocol/channels';
-import type { RegisteredListener } from '../../utils/eventsHelper';
-import { eventsHelper } from '../../utils/eventsHelper';
-import type { BrowserOptions } from '../browser';
+import { eventsHelper } from '../utils/eventsHelper';
 import { Browser } from '../browser';
-import { assertBrowserContextIsNotOwned, BrowserContext } from '../browserContext';
-import type { SdkObject } from '../instrumentation';
+import { BrowserContext, verifyGeolocation } from '../browserContext';
 import * as network from '../network';
+import { BidiConnection } from './bidiConnection';
+import { bidiBytesValueToString } from './bidiNetworkManager';
+import { BidiPage, kPlaywrightBindingChannel } from './bidiPage';
+import { PageBinding } from '../page';
+import * as bidi from './third_party/bidiProtocol';
+
+import type { RegisteredListener } from '../utils/eventsHelper';
+import type { BrowserOptions } from '../browser';
+import type { SdkObject } from '../instrumentation';
 import type { InitScript, Page } from '../page';
 import type { ConnectionTransport } from '../transport';
 import type * as types from '../types';
 import type { BidiSession } from './bidiConnection';
-import { BidiConnection } from './bidiConnection';
-import { bidiBytesValueToString } from './bidiNetworkManager';
-import { BidiPage } from './bidiPage';
-import * as bidi from './third_party/bidiProtocol';
+import type * as channels from '@protocol/channels';
+
 
 export class BidiBrowser extends Browser {
   private readonly _connection: BidiConnection;
@@ -44,40 +47,11 @@ export class BidiBrowser extends Browser {
     if ((options as any).__testHookOnConnectToBrowser)
       await (options as any).__testHookOnConnectToBrowser();
 
-    let proxy: bidi.Session.ManualProxyConfiguration | undefined;
-    if (options.proxy) {
-      proxy = {
-        proxyType: 'manual',
-      };
-      const url = new URL(options.proxy.server);  // Validate proxy server.
-      switch (url.protocol) {
-        case 'http:':
-          proxy.httpProxy = url.host;
-          break;
-        case 'https:':
-          proxy.httpsProxy = url.host;
-          break;
-        case 'socks4:':
-          proxy.socksProxy = url.host;
-          proxy.socksVersion = 4;
-          break;
-        case 'socks5:':
-          proxy.socksProxy = url.host;
-          proxy.socksVersion = 5;
-          break;
-        default:
-          throw new Error('Invalid proxy server protocol: ' + options.proxy.server);
-      }
-      if (options.proxy.bypass)
-        proxy.noProxy = options.proxy.bypass.split(',');
-      // TODO: support authentication.
-    }
-
     browser._bidiSessionInfo = await browser._browserSession.send('session.new', {
       capabilities: {
         alwaysMatch: {
-          acceptInsecureCerts: false,
-          proxy,
+          acceptInsecureCerts: options.persistent?.internalIgnoreHTTPSErrors || options.persistent?.ignoreHTTPSErrors,
+          proxy: getProxyConfiguration(options.originalLaunchOptions.proxyOverride ?? options.proxy),
           unhandledPromptBehavior: {
             default: bidi.Session.UserPromptHandlerType.Ignore,
           },
@@ -96,8 +70,9 @@ export class BidiBrowser extends Browser {
     });
 
     if (options.persistent) {
-      browser._defaultContext = new BidiBrowserContext(browser, undefined, options.persistent);
-      await (browser._defaultContext as BidiBrowserContext)._initialize();
+      const context = new BidiBrowserContext(browser, undefined, options.persistent);
+      browser._defaultContext = context;
+      await context._initialize();
       // Create default page as we cannot get access to the existing one.
       const page = await browser._defaultContext.doCreateNewPage();
       await page.waitForInitializedOrError();
@@ -120,7 +95,11 @@ export class BidiBrowser extends Browser {
   }
 
   async doCreateNewContext(options: types.BrowserContextOptions): Promise<BrowserContext> {
-    const { userContext } = await this._browserSession.send('browser.createUserContext', {});
+    const proxy = options.proxyOverride || options.proxy;
+    const { userContext } = await this._browserSession.send('browser.createUserContext', {
+      acceptInsecureCerts: options.internalIgnoreHTTPSErrors || options.ignoreHTTPSErrors,
+      proxy: getProxyConfiguration(proxy),
+    });
     const context = new BidiBrowserContext(this, userContext, options);
     await context._initialize();
     this._contexts.set(userContext, context);
@@ -147,12 +126,12 @@ export class BidiBrowser extends Browser {
     if (event.parent) {
       const parentFrameId = event.parent;
       for (const page of this._bidiPages.values()) {
-        const parentFrame = page._page._frameManager.frame(parentFrameId);
+        const parentFrame = page._page.frameManager.frame(parentFrameId);
         if (!parentFrame)
           continue;
         page._session.addFrameBrowsingContext(event.context);
-        page._page._frameManager.frameAttached(event.context, parentFrameId);
-        const frame = page._page._frameManager.frame(event.context);
+        page._page.frameManager.frameAttached(event.context, parentFrameId);
+        const frame = page._page.frameManager.frame(event.context);
         if (frame)
           frame._url = event.url;
         return;
@@ -176,10 +155,10 @@ export class BidiBrowser extends Browser {
       this._browserSession.removeFrameBrowsingContext(event.context);
       const parentFrameId = event.parent;
       for (const page of this._bidiPages.values()) {
-        const parentFrame = page._page._frameManager.frame(parentFrameId);
+        const parentFrame = page._page.frameManager.frame(parentFrameId);
         if (!parentFrame)
           continue;
-        page._page._frameManager.frameDetached(event.context);
+        page._page.frameManager.frameDetached(event.context);
         return;
       }
       return;
@@ -201,6 +180,8 @@ export class BidiBrowser extends Browser {
 
 export class BidiBrowserContext extends BrowserContext {
   declare readonly _browser: BidiBrowser;
+  private _originToPermissions = new Map<string, string[]>();
+  private _initScriptIds = new Map<InitScript, string>();
 
   constructor(browser: BidiBrowser, browserContextId: string | undefined, options: types.BrowserContextOptions) {
     super(browser, options, browserContextId);
@@ -211,12 +192,27 @@ export class BidiBrowserContext extends BrowserContext {
     return [...this._browser._bidiPages.values()].filter(bidiPage => bidiPage._browserContext === this);
   }
 
+  override async _initialize() {
+    const promises: Promise<any>[] = [
+      super._initialize(),
+    ];
+    promises.push(this.doUpdateDefaultViewport());
+    if (this._options.geolocation)
+      promises.push(this.setGeolocation(this._options.geolocation));
+    if (this._options.locale) {
+      promises.push(this._browser._browserSession.send('emulation.setLocaleOverride', {
+        locale: this._options.locale,
+        userContexts: [this._userContextId()],
+      }));
+    }
+    await Promise.all(promises);
+  }
+
   override possiblyUninitializedPages(): Page[] {
     return this._bidiPages().map(bidiPage => bidiPage._page);
   }
 
   override async doCreateNewPage(): Promise<Page> {
-    assertBrowserContextIsNotOwned(this);
     const { context } = await this._browser._browserSession.send('browsingContext.create', {
       type: bidi.BrowsingContext.CreateType.Window,
       userContext: this._browserContextId,
@@ -267,37 +263,127 @@ export class BidiBrowserContext extends BrowserContext {
   }
 
   async doGrantPermissions(origin: string, permissions: string[]) {
+    const currentPermissions = this._originToPermissions.get(origin) || [];
+    const toGrant = permissions.filter(permission => !currentPermissions.includes(permission));
+    this._originToPermissions.set(origin, [...currentPermissions, ...toGrant]);
+    await Promise.all(toGrant.map(permission => this._setPermission(origin, permission, bidi.Permissions.PermissionState.Granted)));
   }
 
   async doClearPermissions() {
+    const currentPermissions = [...this._originToPermissions.entries()];
+    this._originToPermissions = new Map();
+    await Promise.all(currentPermissions.map(([origin, permissions]) => permissions.map(
+        p => this._setPermission(origin, p, bidi.Permissions.PermissionState.Prompt))));
+  }
+
+  private async _setPermission(origin: string, permission: string, state: bidi.Permissions.PermissionState) {
+    await this._browser._browserSession.send('permissions.setPermission', {
+      descriptor: {
+        name: permission,
+      },
+      state,
+      origin,
+      userContext: this._userContextId(),
+    });
   }
 
   async setGeolocation(geolocation?: types.Geolocation): Promise<void> {
+    verifyGeolocation(geolocation);
+    this._options.geolocation = geolocation;
+    // Setting geolocation on the user context automatically applies it to all existing
+    // pages in the context in Bidi.
+    await this._browser._browserSession.send('emulation.setGeolocationOverride', {
+      coordinates: geolocation ? {
+        latitude: geolocation.latitude,
+        longitude: geolocation.longitude,
+        accuracy: geolocation.accuracy,
+      } : null,
+      userContexts: [this._userContextId()],
+    });
   }
 
-  async setExtraHTTPHeaders(headers: types.HeadersArray): Promise<void> {
+  async doUpdateExtraHTTPHeaders(): Promise<void> {
   }
 
   async setUserAgent(userAgent: string | undefined): Promise<void> {
   }
 
-  async setOffline(offline: boolean): Promise<void> {
+  async doUpdateOffline(): Promise<void> {
   }
 
   async doSetHTTPCredentials(httpCredentials?: types.Credentials): Promise<void> {
     this._options.httpCredentials = httpCredentials;
     for (const page of this.pages())
-      await (page._delegate as BidiPage).updateHttpCredentials();
+      await (page.delegate as BidiPage).updateHttpCredentials();
   }
 
   async doAddInitScript(initScript: InitScript) {
-    await Promise.all(this.pages().map(page => (page._delegate as BidiPage).addInitScript(initScript)));
+    const { script } = await this._browser._browserSession.send('script.addPreloadScript', {
+      // TODO: remove function call from the source.
+      functionDeclaration: `() => { return ${initScript.source} }`,
+      userContexts: [this._userContextId()],
+    });
+    this._initScriptIds.set(initScript, script);
   }
 
-  async doRemoveNonInternalInitScripts() {
+  async doRemoveInitScripts(initScripts: InitScript[]) {
+    const ids: string[] = [];
+    for (const script of initScripts) {
+      const id = this._initScriptIds.get(script);
+      if (id)
+        ids.push(id);
+      this._initScriptIds.delete(script);
+    }
+    await Promise.all(ids.map(script => this._browser._browserSession.send('script.removePreloadScript', { script })));
   }
 
   async doUpdateRequestInterception(): Promise<void> {
+  }
+
+  override async doUpdateDefaultViewport() {
+    if (!this._options.viewport)
+      return;
+    await this._browser._browserSession.send('browsingContext.setViewport', {
+      viewport: {
+        width: this._options.viewport.width,
+        height: this._options.viewport.height
+      },
+      devicePixelRatio: this._options.deviceScaleFactor || 1,
+      userContexts: [this._userContextId()],
+    });
+  }
+
+  override async doUpdateDefaultEmulatedMedia() {
+  }
+
+  override async doExposePlaywrightBinding() {
+    const args: bidi.Script.ChannelValue[] = [{
+      type: 'channel',
+      value: {
+        channel: kPlaywrightBindingChannel,
+        ownership: bidi.Script.ResultOwnership.Root,
+      }
+    }];
+    const functionDeclaration = `function addMainBinding(callback) { globalThis['${PageBinding.kBindingName}'] = callback; }`;
+    const promises = [];
+    promises.push(this._browser._browserSession.send('script.addPreloadScript', {
+      functionDeclaration,
+      arguments: args,
+      userContexts: [this._userContextId()],
+    }));
+    promises.push(...this._bidiPages().map(page => {
+      const realms = [...page._realmToContext].filter(([realm, context]) => context.world === 'main').map(([realm, context]) => realm);
+      return Promise.all(realms.map(realm => {
+        return page._session.send('script.callFunction', {
+          functionDeclaration,
+          arguments: args,
+          target: { realm },
+          awaitPromise: false,
+          userActivation: false,
+        });
+      }));
+    }));
+    await Promise.all(promises);
   }
 
   onClosePersistent() {}
@@ -319,6 +405,14 @@ export class BidiBrowserContext extends BrowserContext {
 
   async cancelDownload(uuid: string) {
   }
+
+  private _userContextId(): bidi.Browser.UserContext {
+    if (this._browserContextId)
+      return this._browserContextId;
+    // Default context always has same id, see
+    // https://w3c.github.io/webdriver-bidi/#default-user-context
+    return 'default';
+  }
 }
 
 function fromBidiSameSite(sameSite: bidi.Network.SameSite): channels.NetworkCookie['sameSite'] {
@@ -337,6 +431,40 @@ function toBidiSameSite(sameSite: channels.SetNetworkCookie['sameSite']): bidi.N
     case 'None': return bidi.Network.SameSite.None;
   }
   return bidi.Network.SameSite.None;
+}
+
+function getProxyConfiguration(proxySettings?: types.ProxySettings): bidi.Session.ManualProxyConfiguration | undefined {
+  if (!proxySettings)
+    return undefined;
+
+  const proxy: bidi.Session.ManualProxyConfiguration = {
+    proxyType: 'manual',
+  };
+  const url = new URL(proxySettings.server);  // Validate proxy server.
+  switch (url.protocol) {
+    case 'http:':
+      proxy.httpProxy = url.host;
+      break;
+    case 'https:':
+      proxy.sslProxy = url.host;
+      break;
+    case 'socks4:':
+      proxy.socksProxy = url.host;
+      proxy.socksVersion = 4;
+      break;
+    case 'socks5:':
+      proxy.socksProxy = url.host;
+      proxy.socksVersion = 5;
+      break;
+    default:
+      throw new Error('Invalid proxy server protocol: ' + proxySettings.server);
+  }
+  const bypass = proxySettings.bypass ?? process.env.PLAYWRIGHT_PROXY_BYPASS_FOR_TESTING;
+  if (bypass)
+    proxy.noProxy = bypass.split(',');
+  // TODO: support authentication.
+
+  return proxy;
 }
 
 export namespace Network {
