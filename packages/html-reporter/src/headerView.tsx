@@ -22,24 +22,35 @@ import './headerView.css';
 import * as icons from './icons';
 import { Link, navigate, SearchParamsContext } from './links';
 import { statusIcon } from './statusIcon';
-import { filterWithToken } from './filter';
+import { filterWithQuery } from './filter';
+import { linkifyText } from '@web/renderUtils';
 
-export const HeaderView: React.FC<React.PropsWithChildren<{
+export const HeaderView: React.FC<{
+  title: string | undefined,
+  leftSuperHeader?: React.ReactNode,
+  rightSuperHeader?: React.ReactNode,
+}> = ({ title, leftSuperHeader, rightSuperHeader }) => {
+  return <div className='header-view'>
+    <div className='hbox header-superheader'>
+      {leftSuperHeader}
+      <div style={{ flex: 'auto' }}></div>
+      {rightSuperHeader}
+    </div>
+    {title && <div className='header-title'>{linkifyText(title)}</div>}
+  </div>;
+};
+
+export const GlobalFilterView: React.FC<{
   stats: Stats,
   filterText: string,
   setFilterText: (filterText: string) => void,
-}>> = ({ stats, filterText, setFilterText }) => {
+}> = ({ stats, filterText, setFilterText }) => {
+  const searchParams = React.useContext(SearchParamsContext);
   React.useEffect(() => {
-    const popstateFn = () => {
-      const params = new URLSearchParams(window.location.hash.slice(1));
-      setFilterText(params.get('q') || '');
-    };
-    window.addEventListener('popstate', popstateFn);
-
-    return () => {
-      window.removeEventListener('popstate', popstateFn);
-    };
-  }, [setFilterText]);
+    // Add an extra space such that users can easily add to query
+    const query = searchParams.get('q');
+    setFilterText(query ? `${query.trim()} ` : '');
+  }, [searchParams, setFilterText]);
 
   return (<>
     <div className='pt-3'>
@@ -50,13 +61,16 @@ export const HeaderView: React.FC<React.PropsWithChildren<{
         event => {
           event.preventDefault();
           const url = new URL(window.location.href);
-          url.hash = filterText ? '?' + new URLSearchParams({ q: filterText }) : '';
+          // If <form/> onSubmit happens immediately after <input/> onChange, the filterText state is not updated yet.
+          // Using FormData here is a workaround to get the latest value.
+          const q = new FormData(event.target as HTMLFormElement).get('q') as string;
+          url.hash = q ? '?' + new URLSearchParams({ q }) : '';
           navigate(url);
         }
       }>
         {icons.search()}
         {/* Use navigationId to reset defaultValue */}
-        <input spellCheck={false} className='form-control subnav-search-input input-contrast width-full' value={filterText} onChange={e => {
+        <input name='q' spellCheck={false} className='form-control subnav-search-input input-contrast width-full' value={filterText} onChange={e => {
           setFilterText(e.target.value);
         }}></input>
       </form>
@@ -67,24 +81,34 @@ export const HeaderView: React.FC<React.PropsWithChildren<{
 const StatsNavView: React.FC<{
   stats: Stats
 }> = ({ stats }) => {
-  const searchParams = React.useContext(SearchParamsContext);
-  const q = searchParams.get('q')?.toString() || '';
-  const tokens = q.split(' ');
   return <nav>
     <Link className='subnav-item' href='#?'>
-      All <span className='d-inline counter'>{stats.total - stats.skipped}</span>
+      <span className='subnav-item-label'>All</span>
+      <span className='d-inline counter'>{stats.total - stats.skipped}</span>
     </Link>
-    <Link className='subnav-item' click={filterWithToken(tokens, 's:passed', false)} ctrlClick={filterWithToken(tokens, 's:passed', true)}>
-      Passed <span className='d-inline counter'>{stats.expected}</span>
-    </Link>
-    <Link className='subnav-item' click={filterWithToken(tokens, 's:failed', false)} ctrlClick={filterWithToken(tokens, 's:failed', true)}>
-      {!!stats.unexpected && statusIcon('unexpected')} Failed <span className='d-inline counter'>{stats.unexpected}</span>
-    </Link>
-    <Link className='subnav-item' click={filterWithToken(tokens, 's:flaky', false)} ctrlClick={filterWithToken(tokens, 's:flaky', true)}>
-      {!!stats.flaky && statusIcon('flaky')} Flaky <span className='d-inline counter'>{stats.flaky}</span>
-    </Link>
-    <Link className='subnav-item' click={filterWithToken(tokens, 's:skipped', false)} ctrlClick={filterWithToken(tokens, 's:skipped', true)}>
-      Skipped <span className='d-inline counter'>{stats.skipped}</span>
-    </Link>
+    <NavLink token='passed' count={stats.expected} />
+    <NavLink token='failed' count={stats.unexpected} />
+    <NavLink token='flaky' count={stats.flaky} />
+    <NavLink token='skipped' count={stats.skipped} />
   </nav>;
+};
+
+const NavLink: React.FC<{
+  token: string,
+  count: number,
+}> = ({ token, count }) => {
+  const searchParams = React.useContext(SearchParamsContext);
+  const q = searchParams.get('q')?.toString() || '';
+  const queryToken = `s:${token}`;
+
+  const clickUrl = filterWithQuery(q, queryToken, false);
+  const ctrlClickUrl = filterWithQuery(q, queryToken, true);
+
+  const label = token.charAt(0).toUpperCase() + token.slice(1);
+
+  return <Link className='subnav-item' href={clickUrl} click={clickUrl} ctrlClick={ctrlClickUrl}>
+    {count > 0 && statusIcon(token as any)}
+    <span className='subnav-item-label'>{label}</span>
+    <span className='d-inline counter'>{count}</span>
+  </Link>;
 };

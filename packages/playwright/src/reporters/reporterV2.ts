@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { FullConfig, TestCase, TestError, TestResult, FullResult, TestStep, Reporter, Suite } from '../../types/testReporter';
+import type { FullConfig, FullResult, Reporter, Suite, TestCase, TestError, TestResult, TestStep } from '../../types/testReporter';
 
 export interface ReporterV2 {
   onConfigure?(config: FullConfig): void;
@@ -31,6 +31,8 @@ export interface ReporterV2 {
   printsToStdio?(): boolean;
   version(): 'v2';
 }
+
+export type AnyReporter = ReporterV2 | Reporter;
 
 type StdIOChunk = {
   chunk: string | Buffer;

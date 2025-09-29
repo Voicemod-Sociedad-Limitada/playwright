@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-import type { TestServerInterface, TestServerInterfaceEvents } from '@testIsomorphic/testServerInterface';
 import * as events from './events';
+
+import type { TestServerInterface, TestServerInterfaceEvents } from '@testIsomorphic/testServerInterface';
+import type * as reporterTypes from '../../types/testReporter';
 
 // -- Reuse boundary -- Everything below this line is reused in the vscode extension.
 
@@ -37,7 +39,7 @@ export class WebSocketTestServerTransport implements TestServerTransport {
   }
 
   onmessage(listener: (message: string) => void) {
-    this._ws.addEventListener('message', event => listener(event.data));
+    this._ws.addEventListener('message', event => listener(event.data.toString()));
   }
 
   onopen(listener: () => void) {
@@ -67,12 +69,14 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
   readonly onStdio: events.Event<{ type: 'stderr' | 'stdout'; text?: string | undefined; buffer?: string | undefined; }>;
   readonly onTestFilesChanged: events.Event<{ testFiles: string[] }>;
   readonly onLoadTraceRequested: events.Event<{ traceUrl: string }>;
+  readonly onRecoverFromStepError: events.Event<{ stepId: string, message: string, location: reporterTypes.Location }>;
 
   private _onCloseEmitter = new events.EventEmitter<void>();
   private _onReportEmitter = new events.EventEmitter<any>();
   private _onStdioEmitter = new events.EventEmitter<{ type: 'stderr' | 'stdout'; text?: string | undefined; buffer?: string | undefined; }>();
   private _onTestFilesChangedEmitter = new events.EventEmitter<{ testFiles: string[] }>();
   private _onLoadTraceRequestedEmitter = new events.EventEmitter<{ traceUrl: string }>();
+  private _onRecoverFromStepErrorEmitter = new events.EventEmitter<{ stepId: string, message: string, location: reporterTypes.Location }>();
 
   private _lastId = 0;
   private _transport: TestServerTransport;
@@ -86,6 +90,7 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
     this.onStdio = this._onStdioEmitter.event;
     this.onTestFilesChanged = this._onTestFilesChangedEmitter.event;
     this.onLoadTraceRequested = this._onLoadTraceRequestedEmitter.event;
+    this.onRecoverFromStepError = this._onRecoverFromStepErrorEmitter.event;
 
     this._transport = transport;
     this._transport.onmessage(data => {
@@ -146,6 +151,8 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
       this._onTestFilesChangedEmitter.fire(params);
     else if (method === 'loadTraceRequested')
       this._onLoadTraceRequestedEmitter.fire(params);
+    else if (method === 'recoverFromStepError')
+      this._onRecoverFromStepErrorEmitter.fire(params);
   }
 
   async initialize(params: Parameters<TestServerInterface['initialize']>[0]): ReturnType<TestServerInterface['initialize']> {
@@ -238,6 +245,10 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
 
   async closeGracefully(params: Parameters<TestServerInterface['closeGracefully']>[0]): ReturnType<TestServerInterface['closeGracefully']> {
     await this._sendMessage('closeGracefully', params);
+  }
+
+  async resumeAfterStepError(params: Parameters<TestServerInterface['resumeAfterStepError']>[0]): Promise<void> {
+    await this._sendMessage('resumeAfterStepError', params);
   }
 
   close() {

@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-import { hostPlatform } from '../../packages/playwright-core/src/utils/hostPlatform';
+import type { BrowserContext } from 'playwright-core';
+import type { TestServer } from '../config/testserver';
+import { hostPlatform } from '../../packages/playwright-core/src/server/utils/hostPlatform';
 import { browserTest as it, expect } from '../config/browserTest';
 import fs from 'fs';
 import os from 'os';
 
-async function checkFeatures(name: string, context: any, server: any) {
+async function checkFeatures(name: string, context: BrowserContext, server: TestServer): Promise<any> {
   try {
     const page = await context.newPage();
     await page.goto(server.PREFIX + '/modernizr/index.html');
@@ -31,14 +33,15 @@ async function checkFeatures(name: string, context: any, server: any) {
   }
 }
 
-it('Safari Desktop', async ({ browser, browserName, platform, server, headless }) => {
+it('Safari Desktop', async ({ browser, browserName, platform, httpsServer, headless }) => {
   it.skip(browserName !== 'webkit');
   it.skip(browserName === 'webkit' && platform === 'darwin' && os.arch() === 'x64', 'Modernizr uses WebGL which is not available on Intel macOS - https://bugs.webkit.org/show_bug.cgi?id=278277');
   it.skip(browserName === 'webkit' && hostPlatform.startsWith('ubuntu20.04'), 'Ubuntu 20.04 is frozen');
   const context = await browser.newContext({
-    deviceScaleFactor: 2
+    deviceScaleFactor: 2,
+    ignoreHTTPSErrors: true,
   });
-  const { actual, expected } = await checkFeatures('safari-18', context, server);
+  const { actual, expected } = await checkFeatures('safari-18', context, httpsServer);
 
   expected.pushmanager = false;
   expected.devicemotion2 = false;
@@ -55,7 +58,6 @@ it('Safari Desktop', async ({ browser, browserName, platform, server, headless }
 
   if (platform === 'linux') {
     expected.speechrecognition = false;
-    expected.publickeycredential = false;
     expected.mediastream = false;
     if (headless)
       expected.todataurlwebp = true;
@@ -66,26 +68,21 @@ it('Safari Desktop', async ({ browser, browserName, platform, server, headless }
   }
 
   if (platform === 'win32') {
-    expected.datalistelem = false;
     expected.getusermedia = false;
     expected.peerconnection = false;
     expected.speechrecognition = false;
     expected.speechsynthesis = false;
-    expected.todataurljpeg = false;
+    expected.todataurlwebp = true;
     expected.webaudio = false;
     expected.gamepads = false;
 
-    expected.input.list = false;
     delete expected.datalistelem;
 
-    expected.publickeycredential = false;
     expected.mediastream = false;
     expected.mediasource = false;
     expected.datachannel = false;
 
     expected.inputtypes.color = false;
-    expected.inputtypes.month = false;
-    expected.inputtypes.week = false;
     expected.inputtypes.date = false;
     expected.inputtypes['datetime-local'] = false;
     expected.inputtypes.time = false;
@@ -94,13 +91,16 @@ it('Safari Desktop', async ({ browser, browserName, platform, server, headless }
   expect(actual).toEqual(expected);
 });
 
-it('Mobile Safari', async ({ playwright, browser, browserName, platform, server, headless }) => {
+it('Mobile Safari', async ({ playwright, browser, browserName, platform, httpsServer, headless }) => {
   it.skip(browserName !== 'webkit');
   it.skip(browserName === 'webkit' && platform === 'darwin' && os.arch() === 'x64', 'Modernizr uses WebGL which is not available on Intel macOS - https://bugs.webkit.org/show_bug.cgi?id=278277');
   it.skip(browserName === 'webkit' && hostPlatform.startsWith('ubuntu20.04'), 'Ubuntu 20.04 is frozen');
   const iPhone = playwright.devices['iPhone 12'];
-  const context = await browser.newContext(iPhone);
-  const { actual, expected } = await checkFeatures('mobile-safari-18', context, server);
+  const context = await browser.newContext({
+    ...iPhone,
+    ignoreHTTPSErrors: true,
+  });
+  const { actual, expected } = await checkFeatures('mobile-safari-18', context, httpsServer);
 
   {
     // All platforms.
@@ -122,7 +122,6 @@ it('Mobile Safari', async ({ playwright, browser, browserName, platform, server,
 
   if (platform === 'linux') {
     expected.speechrecognition = false;
-    expected.publickeycredential = false;
     expected.mediastream = false;
     if (headless)
       expected.todataurlwebp = true;
@@ -133,27 +132,21 @@ it('Mobile Safari', async ({ playwright, browser, browserName, platform, server,
   }
 
   if (platform === 'win32') {
-    expected.datalistelem = false;
     expected.getusermedia = false;
     expected.peerconnection = false;
     expected.speechrecognition = false;
     expected.speechsynthesis = false;
-    expected.todataurljpeg = false;
+    expected.todataurlwebp = true;
     expected.webaudio = false;
     expected.gamepads = false;
 
-    expected.input.list = false;
-
     delete expected.datalistelem;
 
-    expected.publickeycredential = false;
     expected.mediastream = false;
     expected.mediasource = false;
     expected.datachannel = false;
 
     expected.inputtypes.color = false;
-    expected.inputtypes.month = false;
-    expected.inputtypes.week = false;
     expected.inputtypes.date = false;
     expected.inputtypes['datetime-local'] = false;
     expected.inputtypes.time = false;

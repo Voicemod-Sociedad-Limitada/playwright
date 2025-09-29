@@ -15,9 +15,11 @@
  */
 
 import { parseClientSideCallMetadata } from '@isomorphic/traceUtils';
-import type { ContextEntry } from '../types/entries';
+
 import { SnapshotStorage } from './snapshotStorage';
 import { TraceModernizer } from './traceModernizer';
+
+import type { ContextEntry } from '../types/entries';
 
 export interface TraceModelBackend {
   entryNames(): Promise<string[]>;
@@ -43,7 +45,7 @@ export class TraceModel {
     const ordinals: string[] = [];
     let hasSource = false;
     for (const entryName of await this._backend.entryNames()) {
-      const match = entryName.match(/(.+)\.trace/);
+      const match = entryName.match(/(.+)\.trace$/);
       if (match)
         ordinals.push(match[1] || '');
       if (entryName.includes('src@'))
@@ -105,7 +107,7 @@ export class TraceModel {
       this.contextEntries.push(contextEntry);
     }
 
-    this._snapshotStorage!.finalize();
+    this._snapshotStorage.finalize();
   }
 
   async hasEntry(filename: string): Promise<boolean> {
@@ -153,5 +155,6 @@ function createEmptyContext(): ContextEntry {
     errors: [],
     stdio: [],
     hasSource: false,
+    contextId: '',
   };
 }

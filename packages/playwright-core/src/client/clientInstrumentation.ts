@@ -14,26 +14,34 @@
  * limitations under the License.
  */
 
-import type { StackFrame } from '@protocol/channels';
 import type { BrowserContext } from './browserContext';
 import type { APIRequestContext } from './fetch';
+import type { StackFrame } from '@protocol/channels';
 
 // Instrumentation can mutate the data, for example change apiName or stepId.
 export interface ApiCallData {
   apiName: string;
-  params?: Record<string, any>;
+  title?: string;
   frames: StackFrame[];
   userData: any;
   stepId?: string;
   error?: Error;
 }
 
+export type RecoverFromApiErrorResult = {
+  status: 'recovered' | 'failed';
+  value?: string | number | boolean | undefined;
+};
+
+export type RecoverFromApiErrorHandler = () => Promise<RecoverFromApiErrorResult>;
+
 export interface ClientInstrumentation {
   addListener(listener: ClientInstrumentationListener): void;
   removeListener(listener: ClientInstrumentationListener): void;
   removeAllListeners(): void;
-  onApiCallBegin(apiCall: ApiCallData): void;
-  onApiCallEnd(apiCal: ApiCallData): void;
+  onApiCallBegin(apiCall: ApiCallData, channel: { type: string, method: string, params?: Record<string, any> }): void;
+  onApiCallRecovery(apiCall: ApiCallData, error: Error, recoveryHandlers: RecoverFromApiErrorHandler[]): void;
+  onApiCallEnd(apiCall: ApiCallData): void;
   onWillPause(options: { keepTestTimeout: boolean }): void;
 
   runAfterCreateBrowserContext(context: BrowserContext): Promise<void>;
@@ -43,7 +51,8 @@ export interface ClientInstrumentation {
 }
 
 export interface ClientInstrumentationListener {
-  onApiCallBegin?(apiCall: ApiCallData): void;
+  onApiCallBegin?(apiCall: ApiCallData, channel: { type: string, method: string, params?: Record<string, any>  }): void;
+  onApiCallRecovery?(apiCall: ApiCallData, error: Error, recoveryHandlers: RecoverFromApiErrorHandler[]): void;
   onApiCallEnd?(apiCall: ApiCallData): void;
   onWillPause?(options: { keepTestTimeout: boolean }): void;
 

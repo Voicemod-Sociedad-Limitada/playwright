@@ -28,6 +28,7 @@ export type AriaProps = {
   checked?: boolean | 'mixed';
   disabled?: boolean;
   expanded?: boolean;
+  active?: boolean;
   level?: number;
   pressed?: boolean | 'mixed';
   selected?: boolean;
@@ -46,6 +47,8 @@ export type AriaTemplateRoleNode = AriaProps & {
   role: AriaRole | 'fragment';
   name?: AriaRegex | string;
   children?: AriaTemplateNode[];
+  props?: Record<string, string | AriaRegex>;
+  containerMode?: 'contain' | 'equal' | 'deep-equal';
 };
 
 export type AriaTemplateNode = AriaTemplateRoleNode | AriaTemplateTextNode;
@@ -61,22 +64,23 @@ type YamlLibrary = {
 };
 
 type ParsedYamlPosition = { line: number; col: number; };
+type ParsingOptions = yamlTypes.ParseOptions;
 
 export type ParsedYamlError = {
   message: string;
   range: [ParsedYamlPosition, ParsedYamlPosition];
 };
 
-export function parseAriaSnapshotUnsafe(yaml: YamlLibrary, text: string): AriaTemplateNode {
-  const result = parseAriaSnapshot(yaml, text);
+export function parseAriaSnapshotUnsafe(yaml: YamlLibrary, text: string, options: ParsingOptions = {}): AriaTemplateNode {
+  const result = parseAriaSnapshot(yaml, text, options);
   if (result.errors.length)
     throw new Error(result.errors[0].message);
   return result.fragment;
 }
 
-export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: yamlTypes.ParseOptions = {}): { fragment: AriaTemplateNode, errors: ParsedYamlError[] } {
+export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: ParsingOptions = {}): { fragment: AriaTemplateNode, errors: ParsedYamlError[] } {
   const lineCounter = new yaml.LineCounter();
-  const parseOptions: yamlTypes.ParseOptions = {
+  const parseOptions: ParsingOptions = {
     keepSourceTokens: true,
     lineCounter,
     ...options,
@@ -151,6 +155,35 @@ export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: yaml
         continue;
       }
 
+      // - /children: equal
+      if (key.value === '/children') {
+        const valueIsString = value instanceof yaml.Scalar && typeof value.value === 'string';
+        if (!valueIsString || (value.value !== 'contain' && value.value !== 'equal' && value.value !== 'deep-equal')) {
+          errors.push({
+            message: 'Strict value should be "contain", "equal" or "deep-equal"',
+            range: convertRange(((entry.value as any).range || map.range)),
+          });
+          continue;
+        }
+        container.containerMode = value.value;
+        continue;
+      }
+
+      // - /url: "about:blank"
+      if (key.value.startsWith('/')) {
+        const valueIsString = value instanceof yaml.Scalar && typeof value.value === 'string';
+        if (!valueIsString) {
+          errors.push({
+            message: 'Property value should be a string',
+            range: convertRange(((entry.value as any).range || map.range)),
+          });
+          continue;
+        }
+        container.props = container.props ?? {};
+        container.props[key.value.slice(1)] = valueOrRegex(value.value);
+        continue;
+      }
+
       // role "name": ...
       const childNode = KeyParser.parse(key, parseOptions, errors);
       if (!childNode)
@@ -212,15 +245,17 @@ export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: yaml
   convertSeq(fragment, yamlDoc.contents as yamlTypes.YAMLSeq);
   if (errors.length)
     return { errors, fragment: emptyFragment };
-  if (fragment.children?.length === 1)
-    return { fragment: fragment.children[0], errors };
-  return { fragment, errors };
+  // `- button` should target the button, not its parent.
+  if (fragment.children?.length === 1 && (!fragment.containerMode || fragment.containerMode === 'contain'))
+    return { fragment: fragment.children[0], errors: [] };
+  return { fragment, errors: [] };
 }
 
 const emptyFragment: AriaTemplateRoleNode = { kind: 'role', role: 'fragment' };
 
 function normalizeWhitespace(text: string) {
-  return text.replace(/[\r\n\s\t]+/g, ' ').trim();
+  // TODO: why is this different from normalizeWhitespace in stringUtils.ts?
+  return text.replace(/[\u200b\u00ad]/g, '').replace(/[\r\n\s\t]+/g, ' ').trim();
 }
 
 export function valueOrRegex(value: string): string | AriaRegex {
@@ -231,10 +266,11 @@ export class KeyParser {
   private _input: string;
   private _pos: number;
   private _length: number;
+  private _options: ParsingOptions;
 
-  static parse(text: yamlTypes.Scalar<string>, options: yamlTypes.ParseOptions, errors: ParsedYamlError[]): AriaTemplateRoleNode | null {
+  static parse(text: yamlTypes.Scalar<string>, options: ParsingOptions, errors: ParsedYamlError[]): AriaTemplateRoleNode | null {
     try {
-      return new KeyParser(text.value)._parse();
+      return new KeyParser(text.value, options)._parse();
     } catch (e) {
       if (e instanceof ParserError) {
         const message = options.prettyErrors === false ? e.message : e.message + ':\n\n' + text.value + '\n' + ' '.repeat(e.pos) + '^\n';
@@ -248,10 +284,11 @@ export class KeyParser {
     }
   }
 
-  constructor(input: string) {
+  constructor(input: string, options: ParsingOptions) {
     this._input = input;
     this._pos = 0;
     this._length = input.length;
+    this._options = options;
   }
 
   private _peek() {
@@ -409,6 +446,11 @@ export class KeyParser {
     if (key === 'expanded') {
       this._assert(value === 'true' || value === 'false', 'Value of "expanded" attribute must be a boolean', errorPos);
       node.expanded = value === 'true';
+      return;
+    }
+    if (key === 'active') {
+      this._assert(value === 'true' || value === 'false', 'Value of "active" attribute must be a boolean', errorPos);
+      node.active = value === 'true';
       return;
     }
     if (key === 'level') {

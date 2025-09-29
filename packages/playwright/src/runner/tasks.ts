@@ -17,24 +17,30 @@
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
+
+import { monotonicTime, removeFolders } from 'playwright-core/lib/utils';
 import { debug } from 'playwright-core/lib/utilsBundle';
-import { type ManualPromise, monotonicTime, removeFolders } from 'playwright-core/lib/utils';
-import { Dispatcher, type EnvByProjectId } from './dispatcher';
-import type { TestRunnerPluginRegistration } from '../plugins';
-import { createTestGroups, type TestGroup } from '../runner/testGroups';
-import type { Task } from './taskRunner';
-import { TaskRunner } from './taskRunner';
-import type { FullConfigInternal, FullProjectInternal } from '../common/config';
-import { collectProjectsAndTestFiles, createRootSuite, loadFileSuites, loadGlobalHook } from './loadUtils';
-import { removeDirAndLogToConsole, type Matcher } from '../util';
-import { Suite } from '../common/test';
-import { buildDependentProjects, buildTeardownToSetupsMap, filterProjects } from './projectUtils';
+
+import { Dispatcher  } from './dispatcher';
 import { FailureTracker } from './failureTracker';
-import { detectChangedTestFiles } from './vcs';
-import type { InternalReporter } from '../reporters/internalReporter';
-import { cacheDir } from '../transform/compilationCache';
-import type { FullResult } from '../../types/testReporter';
+import { collectProjectsAndTestFiles, createRootSuite, loadFileSuites, loadGlobalHook } from './loadUtils';
+import { buildDependentProjects, buildTeardownToSetupsMap, filterProjects } from './projectUtils';
 import { applySuggestedRebaselines, clearSuggestedRebaselines } from './rebase';
+import { TaskRunner } from './taskRunner';
+import { detectChangedTestFiles } from './vcs';
+import { Suite } from '../common/test';
+import { createTestGroups } from '../runner/testGroups';
+import { cacheDir } from '../transform/compilationCache';
+import { removeDirAndLogToConsole } from '../util';
+
+import type { TestGroup } from '../runner/testGroups';
+import type { EnvByProjectId } from './dispatcher';
+import type { TestRunnerPluginRegistration } from '../plugins';
+import type { Task } from './taskRunner';
+import type { FullResult } from '../../types/testReporter';
+import type { FullConfigInternal, FullProjectInternal } from '../common/config';
+import type { InternalReporter } from '../reporters/internalReporter';
+import type { ManualPromise } from 'playwright-core/lib/utils';
 
 const readDirAsync = promisify(fs.readdir);
 
@@ -96,7 +102,7 @@ async function finishTaskRun(testRun: TestRun, status: FullResult['status']) {
 
 export function createGlobalSetupTasks(config: FullConfigInternal) {
   const tasks: Task<TestRun>[] = [];
-  if (!config.configCLIOverrides.preserveOutputDir && !process.env.PW_TEST_NO_REMOVE_OUTPUT_DIRS)
+  if (!config.configCLIOverrides.preserveOutputDir)
     tasks.push(createRemoveOutputDirsTask());
   tasks.push(
       ...createPluginSetupTasks(config),
@@ -258,13 +264,12 @@ export function createLoadTask(mode: 'out-of-process' | 'in-process', options: {
           await plugin.instance?.populateDependencies?.();
       }
 
-      let cliOnlyChangedMatcher: Matcher | undefined = undefined;
       if (testRun.config.cliOnlyChanged) {
         const changedFiles = await detectChangedTestFiles(testRun.config.cliOnlyChanged, testRun.config.configDir);
-        cliOnlyChangedMatcher = file => changedFiles.has(file);
+        testRun.config.preOnlyTestFilters.push(test => changedFiles.has(test.location.file));
       }
 
-      testRun.rootSuite = await createRootSuite(testRun, options.failOnLoadErrors ? errors : softErrors, !!options.filterOnly, cliOnlyChangedMatcher);
+      testRun.rootSuite = await createRootSuite(testRun, options.failOnLoadErrors ? errors : softErrors, !!options.filterOnly);
       testRun.failureTracker.onRootSuite(testRun.rootSuite);
       // Fail when no tests.
       if (options.failOnLoadErrors && !testRun.rootSuite.allTests().length && !testRun.config.cliPassWithNoTests && !testRun.config.config.shard && !testRun.config.cliOnlyChanged) {
@@ -333,7 +338,7 @@ function createPhasesTask(): Task<TestRun> {
             const projectSuite = projectToSuite.get(project)!;
             const testGroups = createTestGroups(projectSuite, testRun.config.config.workers);
             phase.projects.push({ project, projectSuite, testGroups });
-            testGroupsInPhase += testGroups.length;
+            testGroupsInPhase += Math.min(project.workers ?? Number.MAX_SAFE_INTEGER, testGroups.length);
           }
           debug('pw:test:task')(`created phase #${testRun.phases.length} with ${phase.projects.map(p => p.project.project.name).sort()} projects, ${testGroupsInPhase} testGroups`);
           maxConcurrentTestGroups = Math.max(maxConcurrentTestGroups, testGroupsInPhase);

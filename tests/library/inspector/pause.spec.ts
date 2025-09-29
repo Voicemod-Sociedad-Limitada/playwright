@@ -19,6 +19,7 @@ import { test as it, expect, Recorder } from './inspectorTest';
 import { waitForTestLog } from '../../config/utils';
 import { roundBox } from '../../page/pageTest';
 import type { BoundingBox } from '../../page/pageTest';
+import { pauseHelper } from './pause-helper';
 
 it('should resume when closing inspector', async ({ page, recorderPageGetter, closeRecorder, mode }) => {
   it.skip(mode !== 'default');
@@ -77,6 +78,7 @@ it.describe('pause', () => {
       await page.pause({ __testHookKeepTestTimeout: true });
     })();
     const recorderPage = await recorderPageGetter();
+    await expect(recorderPage.getByRole('button', { name: 'Resume' })).toBeEnabled();
     await recorderPage.keyboard.press('F8');
     await scriptPromise;
   });
@@ -86,11 +88,7 @@ it.describe('pause', () => {
       // @ts-ignore
       await page.pause({ __testHookKeepTestTimeout: true });
     })();
-    await Promise.all([
-      page.waitForFunction(() => (window as any).playwright && (window as any).playwright.resume).then(() => {
-        return page.evaluate('window.playwright.resume()');
-      })
-    ]);
+    await page.waitForFunction(() => (window as any).playwright && (window as any).playwright.resume() !== false);
     await scriptPromise;
   });
 
@@ -109,11 +107,16 @@ it.describe('pause', () => {
     const scriptPromise = (async () => {
       // @ts-ignore
       await page.pause({ __testHookKeepTestTimeout: true });
+      await pauseHelper(page);
     })();
     const recorderPage = await recorderPageGetter();
     await expect(recorderPage.getByRole('combobox', { name: 'Source chooser' })).toHaveValue(/pause\.spec\.ts/);
-    const source = await recorderPage.textContent('.source-line-paused');
-    expect(source).toContain('page.pause({ __testHookKeepTestTimeout: true })');
+    await expect(recorderPage.locator('.source-line-paused')).toContainText('page.pause({ __testHookKeepTestTimeout: true })');
+
+    await recorderPage.click('[title="Step over (F10)"]');
+    await expect(recorderPage.getByRole('combobox', { name: 'Source chooser' })).toHaveValue(/pause-helper\.ts/);
+    await expect(recorderPage.locator('.source-line-paused')).toContainText('page.setContent(\'<div>here we go</div>\')');
+
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
   });
@@ -243,9 +246,9 @@ it.describe('pause', () => {
     await recorderPage.click('[title="Resume (F8)"]');
     await recorderPage.waitForSelector('.source-line-paused:has-text("page.pause({ __testHookKeepTestTimeout: true });  // 2")');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'page.click(page.locator(\'button\'))- XXms',
-      'page.pause',
+      'Pause- XXms',
+      'Click(page.locator(\'button\'))- XXms',
+      'Pause',
     ]);
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
@@ -268,8 +271,10 @@ it.describe('pause', () => {
     await recorderPage.click('[title="Resume (F8)"]');
     await recorderPage.waitForSelector('.source-line-paused:has-text("page.pause({ __testHookKeepTestTimeout: true });  // 2")');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'page.pause',
+      'Pause- XXms',
+      'Start tracing- XXms',
+      'Stop tracing- XXms',
+      'Pause',
     ]);
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
@@ -289,10 +294,10 @@ it.describe('pause', () => {
     await recorderPage.click('[title="Resume (F8)"]');
     await recorderPage.waitForSelector('.source-line-paused:has-text("page.pause({ __testHookKeepTestTimeout: true });  // 2")');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'expect(page.locator(\'button\')).toHaveText()- XXms',
-      'expect(page.locator(\'button\')).not.toHaveText()- XXms',
-      'page.pause',
+      'Pause- XXms',
+      'Expect "toHaveText"(page.locator(\'button\'))- XXms',
+      'Expect "not toHaveText"(page.locator(\'button\'))- XXms',
+      'Pause',
     ]);
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
@@ -332,10 +337,10 @@ it.describe('pause', () => {
     await recorderPage.click('[title="Resume (F8)"]');
     await recorderPage.waitForSelector('.source-line-paused:has-text("page.pause({ __testHookKeepTestTimeout: true });  // 2")');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'page.waitForEvent(console)',
-      'page.getByRole(\'button\', { name: \'Submit\' }).click()- XXms',
-      'page.pause',
+      'Pause- XXms',
+      'Wait for event "console"- XXms',
+      'Click(page.getByRole(\'button\', { name: \'Submit\' }))- XXms',
+      'Pause',
     ]);
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
@@ -352,8 +357,8 @@ it.describe('pause', () => {
     await recorderPage.click('[title="Resume (F8)"]');
     await recorderPage.waitForSelector('.source-line-error-underline');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'page.getByRole(\'button\').isChecked()- XXms',
+      'Pause- XXms',
+      'Is checked(page.getByRole(\'button\'))- XXms',
       'waiting for getByRole(\'button\')',
       'error: Error: Not a checkbox or radio button',
     ]);
@@ -377,11 +382,11 @@ it.describe('pause', () => {
     await recorderPage.waitForSelector('.source-line-paused:has-text("page.pause")');
     await recorderPage.waitForSelector('.source-line-error:has-text("page.waitForEvent")');
     expect(await sanitizeLog(recorderPage)).toEqual([
-      'page.pause- XXms',
-      'page.waitForEvent(console)',
-      'waiting for event \"console\"',
-      'error: Timeout 1ms exceeded while waiting for event \"console\"',
-      'page.pause',
+      'Pause- XXms',
+      'Wait for event "console"- XXms',
+      'waiting for event "console"',
+      'error: Timeout 1ms exceeded while waiting for event "console"',
+      'Pause',
     ]);
     await recorderPage.click('[title="Resume (F8)"]');
     await scriptPromise;
@@ -447,6 +452,7 @@ it.describe('pause', () => {
       })();
       const recorderPage = await recorderPageGetter();
 
+      await recorderPage.getByRole('combobox', { name: 'Source chooser' }).selectOption('csharp');
       const box1Promise = waitForTestLog<BoundingBox>(page, 'Highlight box for test: ');
       await recorderPage.getByText('Locator', { exact: true }).click();
       await recorderPage.locator('.tabbed-pane .CodeMirror').click();
@@ -541,7 +547,7 @@ it.describe('pause', () => {
     await recorder.hoverOverElement('body', { omitTooltip: true });
     await recorder.trustedClick();
 
-    await expect(recorderPage.getByRole('combobox', { name: 'Source chooser' })).toHaveValue('javascript');
+    await expect(recorderPage.getByRole('combobox', { name: 'Source chooser' })).toHaveValue('playwright-test');
     await expect(recorderPage.locator('.cm-wrapper')).toContainText(`await page.locator('body').click();`);
     await recorderPage.getByRole('button', { name: 'Resume' }).click();
     await scriptPromise;

@@ -14,17 +14,21 @@
  * limitations under the License.
  */
 
-import { colors as realColors, ms as milliseconds, parseStackTraceLine } from 'playwright-core/lib/utilsBundle';
 import path from 'path';
-import type { FullConfig, TestCase, Suite, TestResult, TestError, FullResult, TestStep, Location } from '../../types/testReporter';
-import { getPackageManagerExecCommand } from 'playwright-core/lib/utils';
+
+import { getPackageManagerExecCommand, parseErrorStack } from 'playwright-core/lib/utils';
+import { ms as milliseconds } from 'playwright-core/lib/utilsBundle';
+import { colors as realColors, noColors } from 'playwright-core/lib/utils';
+
+import { ansiRegex, resolveReporterOutputPath, stripAnsiEscapes } from '../util';
 import { getEastAsianWidth } from '../utilsBundle';
+
 import type { ReporterV2 } from './reporterV2';
-import { resolveReporterOutputPath } from '../util';
+import type { FullConfig, FullResult, Location, Suite, TestCase, TestError, TestResult, TestStep } from '../../types/testReporter';
+import type { Colors } from '@isomorphic/colors';
+
 export type TestResultOutput = { chunk: string | Buffer, type: 'stdout' | 'stderr' };
 export const kOutputSymbol = Symbol('output');
-
-type Colors = typeof realColors;
 
 type ErrorDetails = {
   message: string;
@@ -42,70 +46,63 @@ type TestSummary = {
   fatalErrors: TestError[];
 };
 
+export type CommonReporterOptions = {
+  configDir: string,
+  _mode?: 'list' | 'test' | 'merge',
+  _isTestServer?: boolean,
+  _commandHash?: string,
+};
+
 export type Screen = {
   resolveFiles: 'cwd' | 'rootDir';
   colors: Colors;
   isTTY: boolean;
   ttyWidth: number;
+  ttyHeight: number;
+  stdout?: NodeJS.WriteStream;
+  stderr?: NodeJS.WriteStream;
 };
 
-export const noColors: Colors = {
-  bold: (t: string) => t,
-  cyan: (t: string) => t,
-  dim: (t: string) => t,
-  gray: (t: string) => t,
-  green: (t: string) => t,
-  red: (t: string) => t,
-  yellow: (t: string) => t,
-  black: (t: string) => t,
-  blue: (t: string) => t,
-  magenta: (t: string) => t,
-  white: (t: string) => t,
-  grey: (t: string) => t,
-  bgBlack: (t: string) => t,
-  bgRed: (t: string) => t,
-  bgGreen: (t: string) => t,
-  bgYellow: (t: string) => t,
-  bgBlue: (t: string) => t,
-  bgMagenta: (t: string) => t,
-  bgCyan: (t: string) => t,
-  bgWhite: (t: string) => t,
-  strip: (t: string) => t,
-  stripColors: (t: string) => t,
-  reset: (t: string) => t,
-  italic: (t: string) => t,
-  underline: (t: string) => t,
-  inverse: (t: string) => t,
-  hidden: (t: string) => t,
-  strikethrough: (t: string) => t,
-  rainbow: (t: string) => t,
-  zebra: (t: string) => t,
-  america: (t: string) => t,
-  trap: (t: string) => t,
-  random: (t: string) => t,
-  zalgo: (t: string) => t,
-
-  enabled: false,
-  enable: () => {},
-  disable: () => {},
-  setTheme: () => {},
+export type TerminalScreen = Screen & {
+  stdout: NodeJS.WriteStream;
+  stderr: NodeJS.WriteStream;
 };
+
+const DEFAULT_TTY_WIDTH = 100;
+const DEFAULT_TTY_HEIGHT = 40;
+
+// eslint-disable-next-line no-restricted-properties
+const originalProcessStdout = process.stdout;
+// eslint-disable-next-line no-restricted-properties
+const originalProcessStderr = process.stderr;
 
 // Output goes to terminal.
-export const terminalScreen: Screen = (() => {
-  let isTTY = !!process.stdout.isTTY;
-  let ttyWidth = process.stdout.columns || 0;
+export const terminalScreen: TerminalScreen = (() => {
+  let isTTY = !!originalProcessStdout.isTTY;
+  let ttyWidth = originalProcessStdout.columns || 0;
+  let ttyHeight = originalProcessStdout.rows || 0;
   if (process.env.PLAYWRIGHT_FORCE_TTY === 'false' || process.env.PLAYWRIGHT_FORCE_TTY === '0') {
     isTTY = false;
     ttyWidth = 0;
+    ttyHeight = 0;
   } else if (process.env.PLAYWRIGHT_FORCE_TTY === 'true' || process.env.PLAYWRIGHT_FORCE_TTY === '1') {
     isTTY = true;
-    ttyWidth = process.stdout.columns || 100;
+    ttyWidth = originalProcessStdout.columns || DEFAULT_TTY_WIDTH;
+    ttyHeight = originalProcessStdout.rows || DEFAULT_TTY_HEIGHT;
   } else if (process.env.PLAYWRIGHT_FORCE_TTY) {
     isTTY = true;
-    ttyWidth = +process.env.PLAYWRIGHT_FORCE_TTY;
+    const sizeMatch = process.env.PLAYWRIGHT_FORCE_TTY.match(/^(\d+)x(\d+)$/);
+    if (sizeMatch) {
+      ttyWidth = +sizeMatch[1];
+      ttyHeight = +sizeMatch[2];
+    } else {
+      ttyWidth = +process.env.PLAYWRIGHT_FORCE_TTY;
+      ttyHeight = DEFAULT_TTY_HEIGHT;
+    }
     if (isNaN(ttyWidth))
-      ttyWidth = 100;
+      ttyWidth = DEFAULT_TTY_WIDTH;
+    if (isNaN(ttyHeight))
+      ttyHeight = DEFAULT_TTY_HEIGHT;
   }
 
   let useColors = isTTY;
@@ -120,7 +117,10 @@ export const terminalScreen: Screen = (() => {
     resolveFiles: 'cwd',
     isTTY,
     ttyWidth,
-    colors
+    ttyHeight,
+    colors,
+    stdout: originalProcessStdout,
+    stderr: originalProcessStderr,
   };
 })();
 
@@ -129,6 +129,7 @@ export const nonTerminalScreen: Screen = {
   colors: terminalScreen.colors,
   isTTY: false,
   ttyWidth: 0,
+  ttyHeight: 0,
   resolveFiles: 'rootDir',
 };
 
@@ -137,11 +138,17 @@ export const internalScreen: Screen = {
   colors: realColors,
   isTTY: false,
   ttyWidth: 0,
+  ttyHeight: 0,
   resolveFiles: 'rootDir',
 };
 
+export type TerminalReporterOptions = {
+  screen?: TerminalScreen;
+  omitFailures?: boolean;
+};
+
 export class TerminalReporter implements ReporterV2 {
-  screen: Screen = terminalScreen;
+  screen: TerminalScreen;
   config!: FullConfig;
   suite!: Suite;
   totalTestCount = 0;
@@ -151,7 +158,8 @@ export class TerminalReporter implements ReporterV2 {
   private _fatalErrors: TestError[] = [];
   private _failureCount: number = 0;
 
-  constructor(options: { omitFailures?: boolean } = {}) {
+  constructor(options: TerminalReporterOptions = {}) {
+    this.screen = options.screen ?? terminalScreen;
     this._omitFailures = options.omitFailures || false;
   }
 
@@ -311,24 +319,24 @@ export class TerminalReporter implements ReporterV2 {
   }
 
   private _printFailures(failures: TestCase[]) {
-    console.log('');
+    this.writeLine('');
     failures.forEach((test, index) => {
-      console.log(this.formatFailure(test, index + 1));
+      this.writeLine(this.formatFailure(test, index + 1));
     });
   }
 
   private _printSlowTests() {
     const slowTests = this.getSlowTests();
     slowTests.forEach(([file, duration]) => {
-      console.log(this.screen.colors.yellow('  Slow test file: ') + file + this.screen.colors.yellow(` (${milliseconds(duration)})`));
+      this.writeLine(this.screen.colors.yellow('  Slow test file: ') + file + this.screen.colors.yellow(` (${milliseconds(duration)})`));
     });
     if (slowTests.length)
-      console.log(this.screen.colors.yellow('  Consider running tests from slow files in parallel, see https://playwright.dev/docs/test-parallel.'));
+      this.writeLine(this.screen.colors.yellow('  Consider running tests from slow files in parallel. See: https://playwright.dev/docs/test-parallel'));
   }
 
   private _printSummary(summary: string) {
     if (summary.trim())
-      console.log(summary);
+      this.writeLine(summary);
   }
 
   willRetry(test: TestCase): boolean {
@@ -350,6 +358,10 @@ export class TerminalReporter implements ReporterV2 {
   formatError(error: TestError): ErrorDetails {
     return formatError(this.screen, error);
   }
+
+  writeLine(line?: string) {
+    this.screen.stdout?.write(line ? line + '\n' : '\n');
+  }
 }
 
 export function formatFailure(screen: Screen, config: FullConfig, test: TestCase, index?: number): string {
@@ -361,29 +373,54 @@ export function formatFailure(screen: Screen, config: FullConfig, test: TestCase
     const errors = formatResultFailure(screen, test, result, '    ');
     if (!errors.length)
       continue;
-    const retryLines = [];
     if (result.retry) {
-      retryLines.push('');
-      retryLines.push(screen.colors.gray(separator(screen, `    Retry #${result.retry}`)));
+      resultLines.push('');
+      resultLines.push(screen.colors.gray(separator(screen, `    Retry #${result.retry}`)));
     }
-    resultLines.push(...retryLines);
     resultLines.push(...errors.map(error => '\n' + error.message));
-    for (let i = 0; i < result.attachments.length; ++i) {
-      const attachment = result.attachments[i];
+    const attachmentGroups = groupAttachments(result.attachments);
+    for (let i = 0; i < attachmentGroups.length; ++i) {
+      const attachment = attachmentGroups[i];
+      if (attachment.name === 'error-context' && attachment.path) {
+        resultLines.push('');
+        resultLines.push(screen.colors.dim(`    Error Context: ${relativeFilePath(screen, config, attachment.path)}`));
+        continue;
+      }
+
+      if (attachment.name.startsWith('_'))
+        continue;
+
       const hasPrintableContent = attachment.contentType.startsWith('text/');
       if (!attachment.path && !hasPrintableContent)
         continue;
+
       resultLines.push('');
-      resultLines.push(screen.colors.cyan(separator(screen, `    attachment #${i + 1}: ${attachment.name} (${attachment.contentType})`)));
-      if (attachment.path) {
-        const relativePath = path.relative(process.cwd(), attachment.path);
-        resultLines.push(screen.colors.cyan(`    ${relativePath}`));
+      resultLines.push(screen.colors.dim(separator(screen, `    attachment #${i + 1}: ${screen.colors.bold(attachment.name)} (${attachment.contentType})`)));
+
+      if (attachment.actual?.path) {
+        if (attachment.expected?.path) {
+          const expectedPath = relativeFilePath(screen, config, attachment.expected.path);
+          resultLines.push(screen.colors.dim(`    Expected: ${expectedPath}`));
+        }
+        const actualPath = relativeFilePath(screen, config, attachment.actual.path);
+        resultLines.push(screen.colors.dim(`    Received: ${actualPath}`));
+        if (attachment.previous?.path) {
+          const previousPath = relativeFilePath(screen, config, attachment.previous.path);
+          resultLines.push(screen.colors.dim(`    Previous: ${previousPath}`));
+        }
+        if (attachment.diff?.path) {
+          const diffPath = relativeFilePath(screen, config, attachment.diff.path);
+          resultLines.push(screen.colors.dim(`    Diff:     ${diffPath}`));
+        }
+      } else if (attachment.path) {
+        const relativePath = relativeFilePath(screen, config, attachment.path);
+        resultLines.push(screen.colors.dim(`    ${relativePath}`));
         // Make this extensible
         if (attachment.name === 'trace') {
           const packageManagerCommand = getPackageManagerExecCommand();
-          resultLines.push(screen.colors.cyan(`    Usage:`));
+          resultLines.push(screen.colors.dim(`    Usage:`));
           resultLines.push('');
-          resultLines.push(screen.colors.cyan(`        ${packageManagerCommand} playwright show-trace ${quotePathIfNeeded(relativePath)}`));
+          resultLines.push(screen.colors.dim(`        ${packageManagerCommand} playwright show-trace ${quotePathIfNeeded(relativePath)}`));
           resultLines.push('');
         }
       } else {
@@ -392,10 +429,10 @@ export function formatFailure(screen: Screen, config: FullConfig, test: TestCase
           if (text.length > 300)
             text = text.slice(0, 300) + '...';
           for (const line of text.split('\n'))
-            resultLines.push(screen.colors.cyan(`    ${line}`));
+            resultLines.push(screen.colors.dim(`    ${line}`));
         }
       }
-      resultLines.push(screen.colors.cyan(separator(screen, '   ')));
+      resultLines.push(screen.colors.dim(separator(screen, '   ')));
     }
     lines.push(...resultLines);
   }
@@ -539,7 +576,7 @@ export function separator(screen: Screen, text: string = ''): string {
   if (text)
     text += ' ';
   const columns = Math.min(100, screen.ttyWidth || 100);
-  return text + screen.colors.dim('─'.repeat(Math.max(0, columns - text.length)));
+  return text + screen.colors.dim('─'.repeat(Math.max(0, columns - stripAnsiEscapes(text).length)));
 }
 
 function indent(lines: string, tab: string) {
@@ -551,28 +588,7 @@ export function prepareErrorStack(stack: string): {
   stackLines: string[];
   location?: Location;
 } {
-  const lines = stack.split('\n');
-  let firstStackLine = lines.findIndex(line => line.startsWith('    at '));
-  if (firstStackLine === -1)
-    firstStackLine = lines.length;
-  const message = lines.slice(0, firstStackLine).join('\n');
-  const stackLines = lines.slice(firstStackLine);
-  let location: Location | undefined;
-  for (const line of stackLines) {
-    const frame = parseStackTraceLine(line);
-    if (!frame || !frame.file)
-      continue;
-    if (belongsToNodeModules(frame.file))
-      continue;
-    location = { file: frame.file, column: frame.column || 0, line: frame.line || 0 };
-    break;
-  }
-  return { message, stackLines, location };
-}
-
-const ansiRegex = new RegExp('([\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~])))', 'g');
-export function stripAnsiEscapes(str: string): string {
-  return str.replace(ansiRegex, '');
+  return parseErrorStack(stack, path.sep, !!process.env.PWDEBUGIMPL);
 }
 
 function characterWidth(c: string) {
@@ -627,10 +643,6 @@ export function fitToWidth(line: string, width: number, prefix?: string): string
   return taken.reverse().join('');
 }
 
-function belongsToNodeModules(file: string) {
-  return file.includes(`${path.sep}node_modules${path.sep}`);
-}
-
 function resolveFromEnv(name: string): string | undefined {
   const value = process.env[name];
   if (value)
@@ -649,7 +661,7 @@ export function resolveOutputFile(reporterName: string, options: {
       fileName: string,
       outputDir: string,
     }
-  }):  { outputFile: string, outputDir?: string } |undefined {
+  }): { outputFile: string, outputDir?: string } | undefined {
   const name = reporterName.toUpperCase();
   let outputFile = resolveFromEnv(`PLAYWRIGHT_${name}_OUTPUT_FILE`);
   if (!outputFile && options.outputFile)
@@ -671,4 +683,47 @@ export function resolveOutputFile(reporterName: string, options: {
   outputFile = path.resolve(outputDir, reportName);
 
   return { outputFile, outputDir };
+}
+
+type TestAttachment = TestResult['attachments'][number];
+
+type TestAttachmentGroup = TestAttachment & {
+  expected?: TestAttachment;
+  actual?: TestAttachment;
+  diff?: TestAttachment;
+  previous?: TestAttachment;
+};
+
+function groupAttachments(attachments: TestResult['attachments']): TestAttachmentGroup[] {
+  const result: TestAttachmentGroup[] = [];
+  const attachmentsByPrefix = new Map<string, TestAttachment>();
+  for (const attachment of attachments) {
+    if (!attachment.path) {
+      result.push(attachment);
+      continue;
+    }
+
+    const match = attachment.name.match(/^(.*)-(expected|actual|diff|previous)(\.[^.]+)?$/);
+    if (!match) {
+      result.push(attachment);
+      continue;
+    }
+
+    const [, name, category] = match;
+    let group: TestAttachmentGroup | undefined = attachmentsByPrefix.get(name);
+    if (!group) {
+      group = { ...attachment, name };
+      attachmentsByPrefix.set(name, group);
+      result.push(group);
+    }
+    if (category === 'expected')
+      group.expected = attachment;
+    else if (category === 'actual')
+      group.actual = attachment;
+    else if (category === 'diff')
+      group.diff = attachment;
+    else if (category === 'previous')
+      group.previous = attachment;
+  }
+  return result;
 }

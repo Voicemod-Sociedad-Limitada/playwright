@@ -16,12 +16,17 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { TestGroup } from './testGroups';
-import { stdioChunkToParams } from '../common/ipc';
-import type { RunPayload, SerializedConfig, WorkerInitParams } from '../common/ipc';
-import { ProcessHost } from './processHost';
-import { artifactsFolderName } from '../isomorphic/folders';
+
 import { removeFolders } from 'playwright-core/lib/utils';
+
+import { ProcessHost } from './processHost';
+import { stdioChunkToParams } from '../common/ipc';
+import { artifactsFolderName } from '../isomorphic/folders';
+
+import type { TestGroup } from './testGroups';
+import type { RunPayload, SerializedConfig, WorkerInitParams } from '../common/ipc';
+import type { RecoverFromStepErrorResult } from '@testIsomorphic/testServerInterface';
+
 
 let lastWorkerIndex = 0;
 
@@ -32,7 +37,7 @@ export class WorkerHost extends ProcessHost {
   private _params: WorkerInitParams;
   private _didFail = false;
 
-  constructor(testGroup: TestGroup, parallelIndex: number, config: SerializedConfig, extraEnv: Record<string, string | undefined>, outputDir: string) {
+  constructor(testGroup: TestGroup, parallelIndex: number, config: SerializedConfig, recoverFromStepErrors: boolean, extraEnv: Record<string, string | undefined>, outputDir: string) {
     const workerIndex = lastWorkerIndex++;
     super(require.resolve('../worker/workerMain.js'), `worker-${workerIndex}`, {
       ...extraEnv,
@@ -49,7 +54,8 @@ export class WorkerHost extends ProcessHost {
       repeatEachIndex: testGroup.repeatEachIndex,
       projectId: testGroup.projectId,
       config,
-      artifactsDir: path.join(outputDir, artifactsFolderName(workerIndex))
+      artifactsDir: path.join(outputDir, artifactsFolderName(workerIndex)),
+      recoverFromStepErrors,
     };
   }
 
@@ -75,8 +81,16 @@ export class WorkerHost extends ProcessHost {
     this.sendMessageNoReply({ method: 'runTestGroup', params: runPayload });
   }
 
+  resumeAfterStepError(result: RecoverFromStepErrorResult) {
+    this.sendMessageNoReply({ method: 'resumeAfterStepError', params: result });
+  }
+
   hash() {
     return this._hash;
+  }
+
+  projectId() {
+    return this._params.projectId;
   }
 
   didFail() {

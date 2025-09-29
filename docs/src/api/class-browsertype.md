@@ -90,17 +90,6 @@ class BrowserTypeExamples
 * langs: js
 - returns: <[Browser]>
 
-This method attaches Playwright to an existing browser instance created via [`method: BrowserType.launchServer`].
-
-:::note
-The major and minor version of the Playwright instance that connects needs to match the version of Playwright that launches the browser (1.2.3 → is compatible with 1.2.x).
-:::
-
-## async method: BrowserType.connect
-* since: v1.8
-* langs: python, csharp, java
-- returns: <[Browser]>
-
 This method attaches Playwright to an existing browser instance created via `BrowserType.launchServer` in Node.js.
 
 :::note
@@ -111,7 +100,7 @@ The major and minor version of the Playwright instance that connects needs to ma
 * since: v1.10
 - `wsEndpoint` <[string]>
 
-A Playwright browser websocket endpoint to connect to. You obtain this endpoint via [`method: BrowserServer.wsEndpoint`].
+A Playwright browser websocket endpoint to connect to. You obtain this endpoint via `BrowserServer.wsEndpoint`.
 
 ### option: BrowserType.connect.headers
 * since: v1.11
@@ -129,6 +118,7 @@ can see what is going on. Defaults to 0.
 ### option: BrowserType.connect.logger
 * since: v1.14
 * langs: js
+* deprecated: The logs received by the logger are incomplete. Please use tracing instead.
 - `logger` <[Logger]>
 
 Logger sink for Playwright logging. Optional.
@@ -213,9 +203,8 @@ A CDP websocket endpoint or http url to connect to. For example `http://localhos
 ### option: BrowserType.connectOverCDP.endpointURL
 * since: v1.14
 * langs: js
+* deprecated: Use the first argument instead.
 - `endpointURL` <[string]>
-
-Deprecated, use the first argument instead. Optional.
 
 ### option: BrowserType.connectOverCDP.headers
 * since: v1.11
@@ -233,6 +222,7 @@ can see what is going on. Defaults to 0.
 ### option: BrowserType.connectOverCDP.logger
 * since: v1.14
 * langs: js
+* deprecated: The logs received by the logger are incomplete. Please use tracing instead.
 - `logger` <[Logger]>
 
 Logger sink for Playwright logging. Optional.
@@ -336,11 +326,17 @@ this context will automatically close the browser.
 * since: v1.8
 - `userDataDir` <[path]>
 
-Path to a User Data Directory, which stores browser session data like cookies and local storage. More details for
+Path to a User Data Directory, which stores browser session data like cookies and local storage. Pass an empty string to create a temporary directory.
+
+More details for
 [Chromium](https://chromium.googlesource.com/chromium/src/+/master/docs/user_data_dir.md#introduction) and
-[Firefox](https://developer.mozilla.org/en-US/docs/Mozilla/Command_Line_Options#User_Profile).
-Note that Chromium's user data directory is the **parent** directory of the "Profile Path" seen at `chrome://version`. Pass an empty string to
-use a temporary directory instead.
+[Firefox](https://wiki.mozilla.org/Firefox/CommandLineOptions#User_profile). Chromium's user data directory is the **parent** directory of the "Profile Path" seen at `chrome://version`.
+
+Note that browsers do not allow launching multiple instances with the same User Data Directory.
+
+:::warning
+Chromium/Chrome: Due to recent Chrome policy changes, automating the default Chrome user profile is not supported. Pointing `userDataDir` to Chrome's main "User Data" directory (the profile used for your regular browsing) may result in pages not loading or the browser exiting. Create and use a separate directory (for example, an empty folder) as your automation profile instead. See https://developer.chrome.com/blog/remote-debugging-port for details.
+:::
 
 ### option: BrowserType.launchPersistentContext.-inline- = %%-shared-browser-options-list-v1.8-%%
 * since: v1.8

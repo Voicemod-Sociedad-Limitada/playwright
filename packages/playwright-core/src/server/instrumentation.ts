@@ -15,14 +15,21 @@
  */
 
 import { EventEmitter } from 'events';
-import { createGuid } from '../utils';
-import type { APIRequestContext } from './fetch';
+
+import { createGuid } from './utils/crypto';
+
 import type { Browser } from './browser';
 import type { BrowserContext } from './browserContext';
 import type { BrowserType } from './browserType';
+import type { Dialog } from './dialog';
+import type { Download } from './download';
+import type { APIRequestContext } from './fetch';
 import type { Frame } from './frames';
 import type { Page } from './page';
 import type { Playwright } from './playwright';
+import type { CallMetadata } from '@protocol/callMetadata';
+export type { CallMetadata } from '@protocol/callMetadata';
+import type { LogName } from './utils/debugLogger';
 
 export type Attribution = {
   playwright: Playwright;
@@ -33,15 +40,11 @@ export type Attribution = {
   frame?: Frame;
 };
 
-import type { CallMetadata } from '@protocol/callMetadata';
-import type { Dialog } from './dialog';
-import type { Download } from './download';
-export type { CallMetadata } from '@protocol/callMetadata';
-
 export class SdkObject extends EventEmitter {
   guid: string;
   attribution: Attribution;
   instrumentation: Instrumentation;
+  logName?: LogName;
 
   constructor(parent: SdkObject, guidPrefix?: string, guid?: string) {
     super();
@@ -50,6 +53,13 @@ export class SdkObject extends EventEmitter {
     this.attribution = { ...parent.attribution };
     this.instrumentation = parent.instrumentation;
   }
+}
+
+export function createRootSdkObject() {
+  const fakeParent = { attribution: {}, instrumentation: createInstrumentation() };
+  const root = new SdkObject(fakeParent as any);
+  root.guid = '';
+  return root;
 }
 
 export interface Instrumentation {
@@ -100,17 +110,4 @@ export function createInstrumentation(): Instrumentation {
       };
     },
   });
-}
-
-export function serverSideCallMetadata(): CallMetadata {
-  return {
-    id: '',
-    startTime: 0,
-    endTime: 0,
-    type: 'Internal',
-    method: '',
-    params: {},
-    log: [],
-    isServerSide: true,
-  };
 }

@@ -363,6 +363,7 @@ await context.AddCookiesAsync(new[] { cookie1, cookie2 });
   - `httpOnly` ?<[boolean]> Optional.
   - `secure` ?<[boolean]> Optional.
   - `sameSite` ?<[SameSiteAttribute]<"Strict"|"Lax"|"None">> Optional.
+  - `partitionKey` ?<[string]> For partitioned third-party cookies (aka [CHIPS](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Privacy_sandbox/Partitioned_cookies)), the partition key. Optional.
 
 ## async method: BrowserContext.addInitScript
 * since: v1.8
@@ -467,7 +468,7 @@ All existing background pages in the context.
 * since: v1.8
 - returns: <[null]|[Browser]>
 
-Returns the browser instance of the context. If it was launched as a persistent context null gets returned.
+Gets the browser instance that owns the context. Returns `null` if the context is created outside of normal browser, e.g. Android or Electron.
 
 ## async method: BrowserContext.clearCookies
 * since: v1.8
@@ -602,6 +603,7 @@ The default browser context cannot be closed.
   - `httpOnly` <[boolean]>
   - `secure` <[boolean]>
   - `sameSite` <[SameSiteAttribute]<"Strict"|"Lax"|"None">>
+  - `partitionKey` ?<[string]>
 
 If no URLs are specified, this method returns all cookies. If URLs are specified, only cookies that affect those URLs
 are returned.
@@ -985,6 +987,7 @@ Here are some permissions that may be supported by some browsers:
 * `'notifications'`
 * `'payment-handler'`
 * `'storage-access'`
+* `'local-fonts'`
 
 ### option: BrowserContext.grantPermissions.origin
 * since: v1.8
@@ -1203,9 +1206,7 @@ Enabling routing disables http cache.
 * since: v1.8
 - `url` <[string]|[RegExp]|[function]\([URL]\):[boolean]>
 
-A glob pattern, regex pattern or predicate receiving [URL] to match while routing.
-When a [`option: Browser.newContext.baseURL`] via the context options was provided and the passed URL is a path,
-it gets merged via the [`new URL()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/URL) constructor.
+A glob pattern, regex pattern, or predicate that receives a [URL] to match during routing. If [`option: Browser.newContext.baseURL`] is set in the context options and the provided URL is a string that does not start with `*`, it is resolved using the [`new URL()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/URL) constructor.
 
 ### param: BrowserContext.route.handler
 * since: v1.8
@@ -1494,6 +1495,7 @@ its geolocation.
 
 Whether to emulate network being offline for the browser context.
 
+
 ## async method: BrowserContext.storageState
 * since: v1.8
 - returns: <[Object]>
@@ -1512,7 +1514,7 @@ Whether to emulate network being offline for the browser context.
       - `name` <[string]>
       - `value` <[string]>
 
-Returns storage state for this browser context, contains current cookies and local storage snapshot.
+Returns storage state for this browser context, contains current cookies, local storage snapshot and IndexedDB snapshot.
 
 ## async method: BrowserContext.storageState
 * since: v1.8
@@ -1521,6 +1523,13 @@ Returns storage state for this browser context, contains current cookies and loc
 
 ### option: BrowserContext.storageState.path = %%-storagestate-option-path-%%
 * since: v1.8
+
+### option: BrowserContext.storageState.indexedDB
+* since: v1.51
+- `indexedDB` ?<boolean>
+
+Set to `true` to include [IndexedDB](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API) in the storage state snapshot.
+If your application uses IndexedDB to store authentication tokens, like Firebase Authentication, enable this.
 
 ## property: BrowserContext.tracing
 * since: v1.12

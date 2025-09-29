@@ -20,7 +20,11 @@ import { TestFileView } from './testFileView';
 import './testFileView.css';
 import { msToString } from './utils';
 import { AutoChip } from './chip';
-import { TestErrorView } from './testErrorView';
+import { CodeSnippet } from './testErrorView';
+import * as icons from './icons';
+import { isMetadataEmpty, MetadataView } from './metadataView';
+import { HeaderView } from './headerView';
+import { clsx } from '@web/uiUtils';
 
 export const TestFilesView: React.FC<{
   tests: TestFileSummary[],
@@ -62,19 +66,38 @@ export const TestFilesView: React.FC<{
 export const TestFilesHeader: React.FC<{
   report: HTMLReport | undefined,
   filteredStats?: FilteredStats,
-}> = ({ report, filteredStats }) => {
+  metadataVisible: boolean,
+  toggleMetadataVisible: () => void,
+}> = ({ report, filteredStats, metadataVisible, toggleMetadataVisible }) => {
   if (!report)
-    return;
-  return <>
-    <div className='mt-2 mx-1' style={{ display: 'flex' }}>
-      {report.projectNames.length === 1 && !!report.projectNames[0] && <div data-testid='project-name' style={{ color: 'var(--color-fg-subtle)' }}>Project: {report.projectNames[0]}</div>}
-      {filteredStats && <div data-testid='filtered-tests-count' style={{ color: 'var(--color-fg-subtle)', padding: '0 10px' }}>Filtered: {filteredStats.total} {!!filteredStats.total && ('(' + msToString(filteredStats.duration) + ')')}</div>}
-      <div style={{ flex: 'auto' }}></div>
-      <div data-testid='overall-time' style={{ color: 'var(--color-fg-subtle)', marginRight: '10px' }}>{report ? new Date(report.startTime).toLocaleString() : ''}</div>
-      <div data-testid='overall-duration' style={{ color: 'var(--color-fg-subtle)' }}>Total time: {msToString(report.duration ?? 0)}</div>
+    return null;
+
+  const showProject = report.projectNames.length === 1 && !!report.projectNames[0];
+  const isMetadataInTopLine = !showProject && !filteredStats;
+
+  const metadataToggleButton = !isMetadataEmpty(report.metadata) && (
+    <div className={clsx('metadata-toggle', !isMetadataInTopLine && 'metadata-toggle-second-line')} role='button' onClick={toggleMetadataVisible} title={metadataVisible ? 'Hide metadata' : 'Show metadata'}>
+      {metadataVisible ? icons.downArrow() : icons.rightArrow()}Metadata
     </div>
+  );
+
+  const leftSuperHeader = <div className='test-file-header-info'>
+    {showProject && <div data-testid='project-name'>Project: {report.projectNames[0]}</div>}
+    {filteredStats && <div data-testid='filtered-tests-count'>Filtered: {filteredStats.total} {!!filteredStats.total && ('(' + msToString(filteredStats.duration) + ')')}</div>}
+    {isMetadataInTopLine && metadataToggleButton}
+  </div>;
+
+  const rightSuperHeader = <>
+    <div data-testid='overall-time' style={{ marginRight: '10px' }}>{report ? new Date(report.startTime).toLocaleString() : ''}</div>
+    <div data-testid='overall-duration'>Total time: {msToString(report.duration ?? 0)}</div>
+  </>;
+
+  return <>
+    <HeaderView title={report.title} leftSuperHeader={leftSuperHeader} rightSuperHeader={rightSuperHeader} />
+    {!isMetadataInTopLine && metadataToggleButton}
+    {metadataVisible && <MetadataView metadata={report.metadata}/>}
     {!!report.errors.length && <AutoChip header='Errors' dataTestId='report-errors'>
-      {report.errors.map((error, index) => <TestErrorView key={'test-report-error-message-' + index} error={error}></TestErrorView>)}
+      {report.errors.map((error, index) => <CodeSnippet key={'test-report-error-message-' + index} code={error}/>)}
     </AutoChip>}
   </>;
 };

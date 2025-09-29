@@ -14,15 +14,17 @@
  * limitations under the License.
  */
 
-import { expect } from '../matchers/expect';
-import { currentlyLoadingFileSuite, currentTestInfo, setCurrentlyLoadingFileSuite } from './globals';
-import { TestCase, Suite } from './test';
-import { wrapFunctionWithLocation } from '../transform/transform';
-import type { FixturesWithLocation } from './config';
-import type { Fixtures, TestType, TestDetails } from '../../types/test';
-import type { Location } from '../../types/testReporter';
-import { getPackageManagerExecCommand, monotonicTime, raceAgainstDeadline, zones } from 'playwright-core/lib/utils';
 import { errors } from 'playwright-core';
+import { getPackageManagerExecCommand, monotonicTime, raceAgainstDeadline, currentZone } from 'playwright-core/lib/utils';
+
+import { currentTestInfo, currentlyLoadingFileSuite, setCurrentlyLoadingFileSuite } from './globals';
+import { Suite, TestCase } from './test';
+import { expect } from '../matchers/expect';
+import { wrapFunctionWithLocation } from '../transform/transform';
+
+import type { FixturesWithLocation } from './config';
+import type { Fixtures, TestDetails, TestStepInfo, TestType } from '../../types/test';
+import type { Location } from '../../types/testReporter';
 
 const testTypeSymbol = Symbol('testType');
 
@@ -100,19 +102,19 @@ export class TestTypeImpl {
       details = fnOrDetails;
     }
 
-    const validatedDetails = validateTestDetails(details);
+    const validatedDetails = validateTestDetails(details, location);
     const test = new TestCase(title, body, this, location);
     test._requireFile = suite._requireFile;
-    test._staticAnnotations.push(...validatedDetails.annotations);
+    test.annotations.push(...validatedDetails.annotations);
     test._tags.push(...validatedDetails.tags);
     suite._addTest(test);
 
     if (type === 'only' || type === 'fail.only')
       test._only = true;
     if (type === 'skip' || type === 'fixme' || type === 'fail')
-      test._staticAnnotations.push({ type });
+      test.annotations.push({ type, location });
     else if (type === 'fail.only')
-      test._staticAnnotations.push({ type: 'fail' });
+      test.annotations.push({ type: 'fail', location });
   }
 
   private _describe(type: 'default' | 'only' | 'serial' | 'serial.only' | 'parallel' | 'parallel.only' | 'skip' | 'fixme', location: Location, titleOrFn: string | Function, fnOrDetails?: TestDetails | Function, fn?: Function) {
@@ -139,7 +141,7 @@ export class TestTypeImpl {
       body = fn!;
     }
 
-    const validatedDetails = validateTestDetails(details);
+    const validatedDetails = validateTestDetails(details, location);
     const child = new Suite(title, 'describe');
     child._requireFile = suite._requireFile;
     child.location = location;
@@ -154,7 +156,7 @@ export class TestTypeImpl {
     if (type === 'parallel' || type === 'parallel.only')
       child._parallelMode = 'parallel';
     if (type === 'skip' || type === 'fixme')
-      child._staticAnnotations.push({ type });
+      child._staticAnnotations.push({ type, location });
 
     for (let parent: Suite | undefined = suite; parent; parent = parent.parent) {
       if (parent._parallelMode === 'serial' && child._parallelMode === 'parallel')
@@ -225,7 +227,7 @@ export class TestTypeImpl {
         if (modifierArgs.length >= 1 && !modifierArgs[0])
           return;
         const description = modifierArgs[1];
-        suite._staticAnnotations.push({ type, description });
+        suite._staticAnnotations.push({ type, description, location });
       }
       return;
     }
@@ -235,7 +237,7 @@ export class TestTypeImpl {
       throw new Error(`test.${type}() can only be called inside test, describe block or fixture`);
     if (typeof modifierArgs[0] === 'function')
       throw new Error(`test.${type}() with a function can only be called inside describe block`);
-    testInfo[type](...modifierArgs as [any, any]);
+    testInfo._modifier(type, location, modifierArgs as [any, any]);
   }
 
   private _setTimeout(location: Location, timeout: number) {
@@ -258,22 +260,17 @@ export class TestTypeImpl {
     suite._use.push({ fixtures, location });
   }
 
-  async _step<T>(expectation: 'pass'|'skip', title: string, body: () => T | Promise<T>, options: {box?: boolean, location?: Location, timeout?: number } = {}): Promise<T> {
+  async _step<T>(expectation: 'pass'|'skip', title: string, body: (step: TestStepInfo) => T | Promise<T>, options: {box?: boolean, location?: Location, timeout?: number } = {}): Promise<T> {
     const testInfo = currentTestInfo();
     if (!testInfo)
       throw new Error(`test.step() can only be called from a test`);
-    if (expectation === 'skip') {
-      const step = testInfo._addStep({ category: 'test.step.skip', title, location: options.location, box: options.box });
-      step.complete({});
-      return undefined as T;
-    }
     const step = testInfo._addStep({ category: 'test.step', title, location: options.location, box: options.box });
-    return await zones.run('stepZone', step, async () => {
+    return await currentZone().with('stepZone', step).run(async () => {
       try {
         let result: Awaited<ReturnType<typeof raceAgainstDeadline<T>>> | undefined = undefined;
         result = await raceAgainstDeadline(async () => {
           try {
-            return await body();
+            return await step.info._runStepBody(expectation === 'skip', body, step.location);
           } catch (e) {
             // If the step timed out, the test fixtures will tear down, which in turn
             // will abort unfinished actions in the step body. Record such errors here.
@@ -312,8 +309,9 @@ function throwIfRunningInsideJest() {
   }
 }
 
-function validateTestDetails(details: TestDetails) {
-  const annotations = Array.isArray(details.annotation) ? details.annotation : (details.annotation ? [details.annotation] : []);
+function validateTestDetails(details: TestDetails, location: Location) {
+  const originalAnnotations = Array.isArray(details.annotation) ? details.annotation : (details.annotation ? [details.annotation] : []);
+  const annotations = originalAnnotations.map(annotation => ({ ...annotation, location }));
   const tags = Array.isArray(details.tag) ? details.tag : (details.tag ? [details.tag] : []);
   for (const tag of tags) {
     if (tag[0] !== '@')

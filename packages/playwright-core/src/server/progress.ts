@@ -15,104 +15,104 @@
  */
 
 import { TimeoutError } from './errors';
-import { assert, monotonicTime } from '../utils';
-import type { LogName } from '../utils/debugLogger';
-import type { CallMetadata, Instrumentation, SdkObject } from './instrumentation';
-import { ManualPromise } from '../utils/manualPromise';
+import { assert } from '../utils';
+import { ManualPromise } from '../utils/isomorphic/manualPromise';
 
-export interface Progress {
-  log(message: string): void;
-  timeUntilDeadline(): number;
-  isRunning(): boolean;
-  cleanupWhenAborted(cleanup: () => any): void;
-  throwIfAborted(): void;
-  metadata: CallMetadata;
-}
+import type { Progress } from '@protocol/progress';
+import type { CallMetadata } from './instrumentation';
+
+export type { Progress } from '@protocol/progress';
 
 export class ProgressController {
   private _forceAbortPromise = new ManualPromise<any>();
+  private _donePromise = new ManualPromise<void>();
+  private _state: 'before' | 'running' | { error: Error } | 'finished' = 'before';
+  private _onCallLog?: (message: string) => void;
 
-  // Cleanups to be run only in the case of abort.
-  private _cleanups: (() => any)[] = [];
-
-  private _logName = 'api';
-  private _state: 'before' | 'running' | 'aborted' | 'finished' = 'before';
-  private _deadline: number = 0;
-  private _timeout: number = 0;
   readonly metadata: CallMetadata;
-  readonly instrumentation: Instrumentation;
-  readonly sdkObject: SdkObject;
 
-  constructor(metadata: CallMetadata, sdkObject: SdkObject) {
-    this.metadata = metadata;
-    this.sdkObject = sdkObject;
-    this.instrumentation = sdkObject.instrumentation;
+  constructor(metadata?: CallMetadata, onCallLog?: (message: string) => void) {
+    this.metadata = metadata || { id: '', startTime: 0, endTime: 0, type: 'Internal', method: '', params: {}, log: [], internal: true };
+    this._onCallLog = onCallLog;
     this._forceAbortPromise.catch(e => null);  // Prevent unhandled promise rejection.
   }
 
-  setLogName(logName: LogName) {
-    this._logName = logName;
-  }
-
-  abort(error: Error) {
-    this._forceAbortPromise.reject(error);
+  async abort(error: Error) {
+    if (this._state === 'running') {
+      (error as any)[kAbortErrorSymbol] = true;
+      this._state = { error };
+      this._forceAbortPromise.reject(error);
+    }
+    await this._donePromise;
   }
 
   async run<T>(task: (progress: Progress) => Promise<T>, timeout?: number): Promise<T> {
-    if (timeout) {
-      this._timeout = timeout;
-      this._deadline = timeout ? monotonicTime() + timeout : 0;
-    }
-
     assert(this._state === 'before');
     this._state = 'running';
-    this.sdkObject.attribution.context?._activeProgressControllers.add(this);
 
     const progress: Progress = {
       log: message => {
         if (this._state === 'running')
           this.metadata.log.push(message);
         // Note: we might be sending logs after progress has finished, for example browser logs.
-        this.instrumentation.onCallLog(this.sdkObject, this.metadata, this._logName, message);
+        this._onCallLog?.(message);
       },
-      timeUntilDeadline: () => this._deadline ? this._deadline - monotonicTime() : 2147483647, // 2^31-1 safe setTimeout in Node.
-      isRunning: () => this._state === 'running',
-      cleanupWhenAborted: (cleanup: () => any) => {
-        if (this._state === 'running')
-          this._cleanups.push(cleanup);
-        else
-          runCleanup(cleanup);
+      metadata: this.metadata,
+      race: <T>(promise: Promise<T> | Promise<T>[]) => {
+        const promises = Array.isArray(promise) ? promise : [promise];
+        return Promise.race([...promises, this._forceAbortPromise]);
       },
-      throwIfAborted: () => {
-        if (this._state === 'aborted')
-          throw new AbortedError();
+      wait: async (timeout: number) => {
+        let timer: NodeJS.Timeout;
+        const promise = new Promise<void>(f => timer = setTimeout(f, timeout));
+        return progress.race(promise).finally(() => clearTimeout(timer));
       },
-      metadata: this.metadata
     };
 
-    const timeoutError = new TimeoutError(`Timeout ${this._timeout}ms exceeded.`);
-    const timer = setTimeout(() => this._forceAbortPromise.reject(timeoutError), progress.timeUntilDeadline());
+    let timer: NodeJS.Timeout | undefined;
+    if (timeout) {
+      const timeoutError = new TimeoutError(`Timeout ${timeout}ms exceeded.`);
+      timer = setTimeout(() => {
+        if (this._state === 'running') {
+          (timeoutError as any)[kAbortErrorSymbol] = true;
+          this._state = { error: timeoutError };
+          this._forceAbortPromise.reject(timeoutError);
+        }
+      }, timeout);
+    }
+
     try {
-      const promise = task(progress);
-      const result = await Promise.race([promise, this._forceAbortPromise]);
+      const result = await task(progress);
       this._state = 'finished';
       return result;
-    } catch (e) {
-      this._state = 'aborted';
-      await Promise.all(this._cleanups.splice(0).map(runCleanup));
-      throw e;
+    } catch (error) {
+      this._state = { error };
+      throw error;
     } finally {
-      this.sdkObject.attribution.context?._activeProgressControllers.delete(this);
       clearTimeout(timer);
+      this._donePromise.resolve();
     }
   }
 }
 
-async function runCleanup(cleanup: () => any) {
-  try {
-    await cleanup();
-  } catch (e) {
-  }
+const kAbortErrorSymbol = Symbol('kAbortError');
+
+export function isAbortError(error: Error): boolean {
+  return !!(error as any)[kAbortErrorSymbol];
 }
 
-class AbortedError extends Error {}
+// Use this method to race some external operation that you really want to undo
+// when it goes beyond the progress abort.
+export async function raceUncancellableOperationWithCleanup<T>(progress: Progress, run: () => Promise<T>, cleanup: (t: T) => void | Promise<unknown>): Promise<T> {
+  let aborted = false;
+  try {
+    return await progress.race(run().then(async t => {
+      if (aborted)
+        await cleanup(t);
+      return t;
+    }));
+  } catch (error) {
+    aborted = true;
+    throw error;
+  }
+}

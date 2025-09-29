@@ -4,6 +4,204 @@ title: "Release notes"
 toc_max_heading_level: 2
 ---
 
+## Version 1.55
+
+### Codegen
+
+- Automatic `ToBeVisibleAsync()` assertions: Codegen can now generate automatic `ToBeVisibleAsync()` assertions for common UI interactions. This feature can be enabled in the Codegen settings UI.
+
+### Breaking Changes
+
+- ⚠️ Dropped support for Chromium extension manifest v2.
+
+### Miscellaneous
+
+- Added support for Debian 13 "Trixie".
+- Added support for Xunit v3 as part of [`Microsoft.Playwright.Xunit.v3`](https://www.nuget.org/packages/Microsoft.Playwright.Xunit.v3)
+- Added support for MSTest v4 as part of [`Microsoft.Playwright.MSTest.v4`](https://www.nuget.org/packages/Microsoft.Playwright.MSTest.v4)
+
+### Browser Versions
+
+- Chromium 140.0.7339.16
+- Mozilla Firefox 141.0
+- WebKit 26.0
+
+This version was also tested against the following stable channels:
+
+- Google Chrome 139
+- Microsoft Edge 139
+
+## Version 1.54
+
+### Highlights
+
+- New cookie property `PartitionKey` in [`method: BrowserContext.cookies`] and [`method: BrowserContext.addCookies`]. This property allows to save and restore partitioned cookies. See [CHIPS MDN article](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Privacy_sandbox/Partitioned_cookies) for more information. Note that browsers have different support and defaults for cookie partitioning.
+
+- New option `--user-data-dir` in multiple commands. You can specify the same user data dir to reuse browsing state, like authentication, between sessions.
+  ```bash
+  pwsh bin/Debug/netX/playwright.ps1 codegen --user-data-dir=./user-data
+  ```
+
+- `pwsh bin/Debug/netX/playwright.ps1 open` does not open the test recorder anymore. Use `pwsh bin/Debug/netX/playwright.ps1 codegen` instead.
+
+### Browser Versions
+
+- Chromium 139.0.7258.5
+- Mozilla Firefox 140.0.2
+- WebKit 26.0
+
+This version was also tested against the following stable channels:
+
+- Google Chrome 140
+- Microsoft Edge 140
+
+## Version 1.53
+
+### Trace Viewer and HTML Reporter Updates
+
+- New Steps in Trace Viewer:
+  ![New Trace Viewer Steps](https://github.com/user-attachments/assets/1963ff7d-4070-41be-a79b-4333176921a2)
+- New method [`method: Locator.describe`] to describe a locator. Used for trace viewer.
+  ```csharp
+  var button = Page.GetByTestId("btn-sub").Describe("Subscribe button");
+  await button.ClickAsync();
+  ```
+- `pwsh bin/Debug/netX/playwright.ps1 install --list` will now list all installed browsers, versions and locations.
+
+### Browser Versions
+
+- Chromium 138.0.7204.4
+- Mozilla Firefox 139.0
+- WebKit 18.5
+
+This version was also tested against the following stable channels:
+
+- Google Chrome 137
+- Microsoft Edge 137
+
+## Version 1.52
+
+### Highlights
+
+- New method [`method: LocatorAssertions.toContainClass`] to ergonomically assert individual class names on the element.
+
+  ```csharp
+    await Expect(Page.GetByRole(AriaRole.Listitem, new() { Name = "Ship v1.52" })).ToContainClassAsync("done");
+  ```
+
+- [Aria Snapshots](./aria-snapshots.md) got two new properties: [`/children`](./aria-snapshots.md#strict-matching) for strict matching and `/url` for links.
+
+  ```csharp
+  await Expect(locator).ToMatchAriaSnapshotAsync(@"
+    - list
+      - /children: equal
+      - listitem: Feature A
+      - listitem:
+        - link ""Feature B"":
+          - /url: ""https://playwright.dev""
+  ");
+  ```
+
+### Miscellaneous
+
+- New option [`option: APIRequest.newContext.maxRedirects`] in [`method: APIRequest.newContext`] to control the maximum number of redirects.
+
+### Breaking Changes
+
+- Glob URL patterns in methods like [`method: Page.route`] do not support `?` and `[]` anymore. We recommend using regular expressions instead.
+- Method [`method: Route.continue`] does not allow to override the `Cookie` header anymore. If a `Cookie` header is provided, it will be ignored, and the cookie will be loaded from the browser's cookie store. To set custom cookies, use [`method: BrowserContext.addCookies`].
+- macOS 13 is now deprecated and will no longer receive WebKit updates. Please upgrade to a more recent macOS version to continue benefiting from the latest WebKit improvements.
+
+### Browser Versions
+
+- Chromium 136.0.7103.25
+- Mozilla Firefox 137.0
+- WebKit 18.4
+
+This version was also tested against the following stable channels:
+
+- Google Chrome 135
+- Microsoft Edge 135
+
+## Version 1.51
+
+### Highlights
+
+* New option [`option: BrowserContext.storageState.indexedDB`] for [`method: BrowserContext.storageState`] allows to save and restore IndexedDB contents. Useful when your application uses [IndexedDB API](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API) to store authentication tokens, like Firebase Authentication.
+
+  Here is an example following the [authentication guide](./auth.md#reusing-signed-in-state):
+
+  ```csharp
+  // Save storage state into the file. Make sure to include IndexedDB.
+  await context.StorageStateAsync(new()
+  {
+      Path = "../../../playwright/.auth/state.json",
+      IndexedDB = true
+  });
+
+  // Create a new context with the saved storage state.
+  var context = await browser.NewContextAsync(new()
+  {
+      StorageStatePath = "../../../playwright/.auth/state.json"
+  });
+  ```
+
+* New option [`option: Locator.filter.visible`] for [`method: Locator.filter`] allows matching only visible elements.
+
+  ```csharp
+  // Ignore invisible todo items.
+  var todoItems = Page.GetByTestId("todo-item").Filter(new() { Visible = true });
+  // Check there are exactly 3 visible ones.
+  await Expect(todoItems).ToHaveCountAsync(3);
+  ```
+
+* New option `Contrast` for methods [`method: Page.emulateMedia`] and [`method: Browser.newContext`] allows to emulate the `prefers-contrast` media feature.
+
+* New option [`option: APIRequest.newContext.failOnStatusCode`] makes all fetch requests made through the [APIRequestContext] throw on response codes other than 2xx and 3xx.
+
+### Browser Versions
+
+* Chromium 134.0.6998.35
+* Mozilla Firefox 135.0
+* WebKit 18.4
+
+This version was also tested against the following stable channels:
+
+* Google Chrome 133
+* Microsoft Edge 133
+
+
+## Version 1.50
+
+### Support for Xunit
+
+* Support for xUnit 2.8+ via [Microsoft.Playwright.Xunit](https://www.nuget.org/packages/Microsoft.Playwright.Xunit). Follow our [Getting Started](./intro.md) guide to learn more.
+
+### Miscellaneous
+
+* Added method [`method: LocatorAssertions.toHaveAccessibleErrorMessage`] to assert the Locator points to an element with a given [aria errormessage](https://w3c.github.io/aria/#aria-errormessage).
+
+### UI updates
+
+* New button in Codegen for picking elements to produce aria snapshots.
+* Additional details (such as keys pressed) are now displayed alongside action API calls in traces.
+* Display of `canvas` content in traces is error-prone. Display is now disabled by default, and can be enabled via the `Display canvas content` UI setting.
+* `Call` and `Network` panels now display additional time information.
+
+### Breaking
+
+* [`method: LocatorAssertions.toBeEditable`] and [`method: Locator.isEditable`] now throw if the target element is not `<input>`, `<select>`, or a number of other editable elements.
+
+### Browser Versions
+
+* Chromium 133.0.6943.16
+* Mozilla Firefox 134.0
+* WebKit 18.2
+
+This version was also tested against the following stable channels:
+
+* Google Chrome 132
+* Microsoft Edge 132
 
 ## Version 1.49
 
@@ -793,9 +991,9 @@ This version was also tested against the following stable channels:
 
   ```html
   <select multiple>
-    <option value="red">Red</div>
-    <option value="green">Green</div>
-    <option value="blue">Blue</div>
+    <option value="red">Red</option>
+    <option value="green">Green</option>
+    <option value="blue">Blue</option>
   </select>
   ```
 

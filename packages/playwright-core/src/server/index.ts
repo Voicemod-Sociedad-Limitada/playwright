@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-export type { Executable } from './registry';
+export type {  BrowserInfo, Executable } from './registry';
 export {
-  registry,
-  registryDirectory,
   Registry,
   installBrowsersForNpmInstall,
+  registry,
+  registryDirectory,
   writeDockerVersion } from './registry';
 
 export { DispatcherConnection, RootDispatcher } from './dispatchers/dispatcher';
@@ -28,6 +28,4 @@ export { createPlaywright } from './playwright';
 
 export type { DispatcherScope } from './dispatchers/dispatcher';
 export type { Playwright } from './playwright';
-export { openTraceInBrowser, openTraceViewerApp, runTraceViewerApp, startTraceViewerServer, installRootRedirect } from './trace/viewer/traceViewer';
-export { serverSideCallMetadata } from './instrumentation';
-export { SocksProxy } from '../common/socksProxy';
+export { installRootRedirect, openTraceInBrowser, openTraceViewerApp, runTraceViewerApp, startTraceViewerServer } from './trace/viewer/traceViewer';

@@ -2,15 +2,9 @@
   "name": "utils-bundle",
   "version": "0.0.1",
   "private": true,
-  "scripts": {
-    "esbuild": "node build.js",
-    "build": "npm run esbuild -- --minify",
-    "watch": "npm run esbuild -- --watch --sourcemap",
-    "generate-license": "node ../../../../utils/generate_third_party_notice.js"
-  },
   "dependencies": {
     "colors": "1.4.0",
-    "commander": "8.3.0",
+    "commander": "^13.0.0",
     "debug": "^4.3.4",
     "diff": "^7.0.0",
     "dotenv": "^16.4.5",
@@ -26,7 +20,6 @@
     "retry": "0.12.0",
     "signal-exit": "3.0.7",
     "socks-proxy-agent": "6.1.1",
-    "stack-utils": "2.0.5",
     "ws": "8.17.1",
     "yaml": "^2.6.0"
   },

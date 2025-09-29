@@ -259,9 +259,9 @@ Specify environment variables that will be visible to the browser. Defaults to `
     - `httpOnly` <[boolean]>
     - `secure` <[boolean]>
     - `sameSite` <[SameSiteAttribute]<"Strict"|"Lax"|"None">> sameSite flag
-  - `origins` <[Array]<[Object]>> localStorage to set for context
+  - `origins` <[Array]<[Object]>>
     - `origin` <[string]>
-    - `localStorage` <[Array]<[Object]>>
+    - `localStorage` <[Array]<[Object]>> localStorage to set for context
       - `name` <[string]>
       - `value` <[string]>
 
@@ -563,6 +563,8 @@ TLS Client Authentication allows the server to request a client certificate and 
 
 An array of client certificates to be used. Each certificate object must have either both `certPath` and `keyPath`, a single `pfxPath`, or their corresponding direct value equivalents (`cert` and `key`, or `pfx`). Optionally, `passphrase` property should be provided if the certificate is encrypted. The `origin` property should be provided with an exact match to the request origin that the certificate is valid for.
 
+Client certificate authentication is only active when at least one client certificate is provided. If you want to reject all client certificates sent by the server, you need to provide a client certificate with an `origin` that does not match any of the domains you plan to visit.
+
 :::note
 When using WebKit on macOS, accessing `localhost` will not pick up client certificates. You can make it work by replacing `localhost` with `local.playwright`.
 :::
@@ -673,8 +675,21 @@ Emulates `'forced-colors'` media feature, supported values are `'active'`, `'non
 
 Emulates `'forced-colors'` media feature, supported values are `'active'`, `'none'`. See [`method: Page.emulateMedia`] for more details. Passing `'null'` resets emulation to system defaults. Defaults to `'none'`.
 
+## context-option-contrast
+* langs: js, java
+- `contrast` <null|[Contrast]<"no-preference"|"more">>
+
+Emulates `'prefers-contrast'` media feature, supported values are `'no-preference'`, `'more'`. See [`method: Page.emulateMedia`] for more details. Passing `null` resets emulation to system defaults. Defaults to `'no-preference'`.
+
+## context-option-contrast-csharp-python
+* langs: csharp, python
+- `contrast` <[Contrast]<"no-preference"|"more"|"null">>
+
+Emulates `'prefers-contrast'` media feature, supported values are `'no-preference'`, `'more'`. See [`method: Page.emulateMedia`] for more details. Passing `'null'` resets emulation to system defaults. Defaults to `'no-preference'`.
+
 ## context-option-logger
 * langs: js
+* deprecated: The logs received by the logger are incomplete. Please use tracing instead.
 - `logger` <[Logger]>
 
 Logger sink for Playwright logging.
@@ -973,6 +988,8 @@ between the same pixel in compared images, between zero (strict) and one (lax), 
 - %%-context-option-reducedMotion-csharp-python-%%
 - %%-context-option-forcedColors-%%
 - %%-context-option-forcedColors-csharp-python-%%
+- %%-context-option-contrast-%%
+- %%-context-option-contrast-csharp-python-%%
 - %%-context-option-logger-%%
 - %%-context-option-videospath-%%
 - %%-context-option-videosize-%%
@@ -1047,7 +1064,7 @@ Close the browser process on SIGHUP. Defaults to `true`.
 
 Whether to run browser in headless mode. More details for
 [Chromium](https://developers.google.com/web/updates/2017/04/headless-chrome) and
-[Firefox](https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Headless_mode). Defaults to `true` unless the
+[Firefox](https://hacks.mozilla.org/2017/12/using-headless-mode-in-firefox/). Defaults to `true` unless the
 [`option: BrowserType.launch.devtools`] option is `true`.
 
 ## js-python-browser-option-firefoxuserprefs
@@ -1057,6 +1074,8 @@ Whether to run browser in headless mode. More details for
 Firefox user preferences. Learn more about the Firefox user preferences at
 [`about:config`](https://support.mozilla.org/en-US/kb/about-config-editor-firefox).
 
+You can also provide a path to a custom [`policies.json` file](https://mozilla.github.io/policy-templates/) via `PLAYWRIGHT_FIREFOX_POLICIES_JSON` environment variable.
+
 ## csharp-java-browser-option-firefoxuserprefs
 * langs: csharp, java
 - `firefoxUserPrefs` <[Object]<[string], [any]>>
@@ -1064,8 +1083,11 @@ Firefox user preferences. Learn more about the Firefox user preferences at
 Firefox user preferences. Learn more about the Firefox user preferences at
 [`about:config`](https://support.mozilla.org/en-US/kb/about-config-editor-firefox).
 
+You can also provide a path to a custom [`policies.json` file](https://mozilla.github.io/policy-templates/) via `PLAYWRIGHT_FIREFOX_POLICIES_JSON` environment variable.
+
 ## browser-option-logger
 * langs: js
+* deprecated: The logs received by the logger are incomplete. Please use tracing instead.
 - `logger` <[Logger]>
 
 Logger sink for Playwright logging.
@@ -1140,6 +1162,11 @@ Note that outer and inner locators must belong to the same frame. Inner locator 
 
 Matches elements that do not contain specified text somewhere inside, possibly in a child or a descendant element. When passed a [string], matching is case-insensitive and searches for a substring.
 
+## locator-option-visible
+- `visible` <[boolean]>
+
+Only matches visible or invisible elements.
+
 ## locator-options-list-v1.14
 - %%-locator-option-has-text-%%
 - %%-locator-option-has-%%
@@ -1190,6 +1217,7 @@ Specify screenshot type, defaults to `png`.
 
 Specify locators that should be masked when the screenshot is taken. Masked elements will be overlaid with
 a pink box `#FF00FF` (customized by [`option: maskColor`]) that completely covers its bounding box.
+The mask is also applied to invisible elements, see [Matching only visible elements](../locators.md#matching-only-visible-elements) to disable that.
 
 ## screenshot-option-mask-color
 * since: v1.35

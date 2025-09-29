@@ -14,20 +14,30 @@
  * limitations under the License.
  */
 
-import type { Locator, Page, APIResponse } from 'playwright-core';
-import type { FrameExpectParams } from 'playwright-core/lib/client/types';
-import { colors } from 'playwright-core/lib/utilsBundle';
-import { expectTypes, callLogText } from '../util';
+import { constructURLBasedOnBaseURL, isRegExp, isString, isTextualMimeType, pollAgainstDeadline, serializeExpectedTextValues } from 'playwright-core/lib/utils';
+import { colors } from 'playwright-core/lib/utils';
+
+import { callLogText, expectTypes } from '../util';
 import { toBeTruthy } from './toBeTruthy';
 import { toEqual } from './toEqual';
+import { toHaveURLWithPredicate } from './toHaveURL';
 import { toMatchText } from './toMatchText';
-import { constructURLBasedOnBaseURL, isRegExp, isString, isTextualMimeType, pollAgainstDeadline, serializeExpectedTextValues } from 'playwright-core/lib/utils';
+import { takeFirst } from '../common/config';
 import { currentTestInfo } from '../common/globals';
 import { TestInfoImpl } from '../worker/testInfo';
+
 import type { ExpectMatcherState } from '../../types/test';
-import { takeFirst } from '../common/config';
+import type { TestStepInfoImpl } from '../worker/testInfo';
+import type { APIResponse, Locator, Frame, Page } from 'playwright-core';
+import type { FrameExpectParams } from 'playwright-core/lib/client/types';
+
+export type ExpectMatcherStateInternal = ExpectMatcherState & { _stepInfo?: TestStepInfoImpl };
 
 export interface LocatorEx extends Locator {
+  _expect(expression: string, options: FrameExpectParams): Promise<{ matches: boolean, received?: any, log?: string[], timedOut?: boolean }>;
+}
+
+export interface FrameEx extends Frame {
   _expect(expression: string, options: FrameExpectParams): Promise<{ matches: boolean, received?: any, log?: string[], timedOut?: boolean }>;
 }
 
@@ -252,11 +262,34 @@ export function toHaveClass(
     return toEqual.call(this, 'toHaveClass', locator, 'Locator', async (isNot, timeout) => {
       const expectedText = serializeExpectedTextValues(expected);
       return await locator._expect('to.have.class.array', { expectedText, isNot, timeout });
-    }, expected, options);
+    }, expected, options, true);
   } else {
     return toMatchText.call(this, 'toHaveClass', locator, 'Locator', async (isNot, timeout) => {
       const expectedText = serializeExpectedTextValues([expected]);
       return await locator._expect('to.have.class', { expectedText, isNot, timeout });
+    }, expected, options);
+  }
+}
+
+export function toContainClass(
+  this: ExpectMatcherState,
+  locator: LocatorEx,
+  expected: string | string[],
+  options?: { timeout?: number },
+) {
+  if (Array.isArray(expected)) {
+    if (expected.some(e => isRegExp(e)))
+      throw new Error(`"expected" argument in toContainClass cannot contain RegExp values`);
+    return toEqual.call(this, 'toContainClass', locator, 'Locator', async (isNot, timeout) => {
+      const expectedText = serializeExpectedTextValues(expected);
+      return await locator._expect('to.contain.class.array', { expectedText, isNot, timeout });
+    }, expected, options, true);
+  } else {
+    if (isRegExp(expected))
+      throw new Error(`"expected" argument in toContainClass cannot be a RegExp value`);
+    return toMatchText.call(this, 'toContainClass', locator, 'Locator', async (isNot, timeout) => {
+      const expectedText = serializeExpectedTextValues([expected]);
+      return await locator._expect('to.contain.class', { expectedText, isNot, timeout });
     }, expected, options);
   }
 }
@@ -372,26 +405,28 @@ export function toHaveTitle(
   expected: string | RegExp,
   options: { timeout?: number } = {},
 ) {
-  const locator = page.locator(':root') as LocatorEx;
-  return toMatchText.call(this, 'toHaveTitle', locator, 'Locator', async (isNot, timeout) => {
+  return toMatchText.call(this, 'toHaveTitle', page, 'Page', async (isNot, timeout) => {
     const expectedText = serializeExpectedTextValues([expected], { normalizeWhiteSpace: true });
-    return await locator._expect('to.have.title', { expectedText, isNot, timeout });
-  }, expected, options);
+    return await (page.mainFrame() as FrameEx)._expect('to.have.title', { expectedText, isNot, timeout });
+  }, expected, { receiverLabel: 'page', ...options });
 }
 
 export function toHaveURL(
   this: ExpectMatcherState,
   page: Page,
-  expected: string | RegExp,
-  options?: { ignoreCase?: boolean, timeout?: number },
+  expected: string | RegExp | ((url: URL) => boolean),
+  options?: { ignoreCase?: boolean; timeout?: number },
 ) {
+  // Ports don't support predicates. Keep separate server and client codepaths
+  if (typeof expected === 'function')
+    return toHaveURLWithPredicate.call(this, page, expected, options);
+
   const baseURL = (page.context() as any)._options.baseURL;
   expected = typeof expected === 'string' ? constructURLBasedOnBaseURL(baseURL, expected) : expected;
-  const locator = page.locator(':root') as LocatorEx;
-  return toMatchText.call(this, 'toHaveURL', locator, 'Locator', async (isNot, timeout) => {
+  return toMatchText.call(this, 'toHaveURL', page, 'Page', async (isNot, timeout) => {
     const expectedText = serializeExpectedTextValues([expected], { ignoreCase: options?.ignoreCase });
-    return await locator._expect('to.have.url', { expectedText, isNot, timeout });
-  }, expected, options);
+    return await (page.mainFrame() as FrameEx)._expect('to.have.url', { expectedText, isNot, timeout });
+  }, expected, { receiverLabel: 'page', ...options });
 }
 
 export async function toBeOK(

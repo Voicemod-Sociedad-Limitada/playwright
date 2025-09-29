@@ -17,7 +17,33 @@
 
 // No dependencies as it is used from the Electron loader.
 
-export const chromiumSwitches = [
+const disabledFeatures = (assistantMode?: boolean) => [
+  // See https://github.com/microsoft/playwright/pull/10380
+  'AcceptCHFrame',
+  // See https://github.com/microsoft/playwright/issues/14047
+  'AvoidUnnecessaryBeforeUnloadCheckSync',
+  'DestroyProfileOnBrowserClose',
+  // See https://github.com/microsoft/playwright/pull/13854
+  'DialMediaRouteProvider',
+  'GlobalMediaControls',
+  // See https://github.com/microsoft/playwright/pull/27605
+  'HttpsUpgrades',
+  // Hides the Lens feature in the URL address bar. Its not working in unofficial builds.
+  'LensOverlay',
+  // See https://github.com/microsoft/playwright/pull/8162
+  'MediaRouter',
+  // See https://github.com/microsoft/playwright/issues/28023
+  'PaintHolding',
+  // See https://github.com/microsoft/playwright/issues/32230
+  'ThirdPartyStoragePartitioning',
+  // See https://github.com/microsoft/playwright/issues/16126
+  'Translate',
+  // See https://issues.chromium.org/u/1/issues/435410220
+  'AutoDeElevate',
+  assistantMode ? 'AutomationControlled' : '',
+].filter(Boolean);
+
+export const chromiumSwitches = (assistantMode?: boolean, channel?: string) => [
   '--disable-field-trial-config', // https://source.chromium.org/chromium/chromium/src/+/main:testing/variations/README.md
   '--disable-background-networking',
   '--disable-background-timer-throttling',
@@ -31,14 +57,8 @@ export const chromiumSwitches = [
   '--disable-default-apps',
   '--disable-dev-shm-usage',
   '--disable-extensions',
-  // AvoidUnnecessaryBeforeUnloadCheckSync - https://github.com/microsoft/playwright/issues/14047
-  // Translate - https://github.com/microsoft/playwright/issues/16126
-  // HttpsUpgrades - https://github.com/microsoft/playwright/pull/27605
-  // PaintHolding - https://github.com/microsoft/playwright/issues/28023
-  // ThirdPartyStoragePartitioning - https://github.com/microsoft/playwright/issues/32230
-  // LensOverlay - Hides the Lens feature in the URL address bar. Its not working in unofficial builds.
-  // PlzDedicatedWorker - https://github.com/microsoft/playwright/issues/31747
-  '--disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker',
+  '--disable-features=' + disabledFeatures(assistantMode).join(','),
+  channel === 'chromium-tip-of-tree' ? '--enable-features=CDPScreenshotNewSurface' : '',
   '--allow-pre-commit-input',
   '--disable-hang-monitor',
   '--disable-ipc-flooding-protection',
@@ -48,7 +68,6 @@ export const chromiumSwitches = [
   '--force-color-profile=srgb',
   '--metrics-recording-only',
   '--no-first-run',
-  '--enable-automation',
   '--password-store=basic',
   '--use-mock-keychain',
   // See https://chromium-review.googlesource.com/c/chromium/src/+/2436773
@@ -58,4 +77,7 @@ export const chromiumSwitches = [
   '--disable-search-engine-choice-screen',
   // https://issues.chromium.org/41491762
   '--unsafely-disable-devtools-self-xss-warnings',
-];
+  // Edge can potentially restart on Windows (msRelaunchNoCompatLayer) which looses its file descriptors (stdout/stderr) and CDP (3/4). Disable until fixed upstream.
+  '--edge-skip-compat-layer-relaunch',
+  assistantMode ? '' : '--enable-automation',
+].filter(Boolean);

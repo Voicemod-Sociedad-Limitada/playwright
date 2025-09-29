@@ -26,10 +26,11 @@ import * as React from 'react';
 import { CallLogView } from './callLog';
 import './recorder.css';
 import { asLocator } from '@isomorphic/locatorGenerators';
-import { toggleTheme } from '@web/theme';
+import { useDarkModeSetting } from '@web/theme';
 import { copy, useSetting } from '@web/uiUtils';
 import yaml from 'yaml';
 import { parseAriaSnapshot } from '@isomorphic/ariaSnapshot';
+import { Dialog } from '@web/components/dialog';
 
 export interface RecorderProps {
   sources: Source[],
@@ -45,21 +46,23 @@ export const Recorder: React.FC<RecorderProps> = ({
   mode,
 }) => {
   const [selectedFileId, setSelectedFileId] = React.useState<string | undefined>();
-  const [runningFileId, setRunningFileId] = React.useState<string | undefined>();
   const [selectedTab, setSelectedTab] = useSetting<string>('recorderPropertiesTab', 'log');
   const [ariaSnapshot, setAriaSnapshot] = React.useState<string | undefined>();
   const [ariaSnapshotErrors, setAriaSnapshotErrors] = React.useState<SourceHighlight[]>();
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [darkMode, setDarkMode] = useDarkModeSetting();
+  const [autoExpect, setAutoExpect] = useSetting<boolean>('autoExpect', false);
+  const settingsButtonRef = React.useRef<HTMLButtonElement>(null);
+  window.playwrightSelectSource = selectedSourceId => setSelectedFileId(selectedSourceId);
 
-  const fileId = selectedFileId || runningFileId || sources[0]?.id;
+  React.useEffect(() => {
+    window.dispatch({ event: 'setAutoExpect', params: { autoExpect } });
+  }, [autoExpect]);
 
   const source = React.useMemo(() => {
-    if (fileId) {
-      const source = sources.find(s => s.id === fileId);
-      if (source)
-        return source;
-    }
-    return emptySource();
-  }, [sources, fileId]);
+    const source = sources.find(s => s.id === selectedFileId);
+    return source ?? emptySource();
+  }, [sources, selectedFileId]);
 
   const [locator, setLocator] = React.useState('');
   window.playwrightElementPicked = (elementInfo: ElementInfo, userGesture?: boolean) => {
@@ -77,15 +80,13 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
   };
 
-  window.playwrightSetRunningFile = setRunningFileId;
-
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   React.useLayoutEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'center', inline: 'nearest' });
   }, [messagesEndRef]);
 
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       switch (event.key) {
         case 'F8':
@@ -179,25 +180,51 @@ export const Recorder: React.FC<RecorderProps> = ({
       }}></ToolbarButton>
       <div style={{ flex: 'auto' }}></div>
       <div>Target:</div>
-      <SourceChooser fileId={fileId} sources={sources} setFileId={fileId => {
+      <SourceChooser fileId={source.id} sources={sources} setFileId={fileId => {
         setSelectedFileId(fileId);
-        window.dispatch({ event: 'fileChanged', params: { file: fileId } });
+        window.dispatch({ event: 'fileChanged', params: { fileId } });
       }} />
       <ToolbarButton icon='clear-all' title='Clear' disabled={!source || !source.text} onClick={() => {
         window.dispatch({ event: 'clear' });
       }}></ToolbarButton>
-      <ToolbarButton icon='color-mode' title='Toggle color mode' toggled={false} onClick={() => toggleTheme()}></ToolbarButton>
+      <ToolbarButton
+        ref={settingsButtonRef}
+        icon='settings-gear'
+        title='Settings'
+        onClick={() => setSettingsOpen(current => !current)}
+      />
+      <Dialog
+        style={{ padding: '4px 8px' }}
+        open={settingsOpen}
+        width={200}
+        verticalOffset={8}
+        requestClose={() => setSettingsOpen(false)}
+        anchor={settingsButtonRef}
+        dataTestId='settings-dialog'
+      >
+        <div key='dark-mode-setting' className='setting'>
+          <input type='checkbox' id='dark-mode-setting' checked={darkMode} onChange={() => setDarkMode(!darkMode)} />
+          <label htmlFor='dark-mode-setting'>Dark mode</label>
+        </div>
+        <div key='auto-expect-setting' className='setting' title='Automatically generate assertions while recording'>
+          <input type='checkbox' id='auto-expect-setting' checked={autoExpect} onChange={() => {
+            window.dispatch({ event: 'setAutoExpect', params: { autoExpect: !autoExpect } });
+            setAutoExpect(!autoExpect);
+          }} />
+          <label htmlFor='auto-expect-setting'>Generate assertions</label>
+        </div>
+      </Dialog>
     </Toolbar>
     <SplitView
       sidebarSize={200}
-      main={<CodeMirrorWrapper text={source.text} language={source.language} highlight={source.highlight} revealLine={source.revealLine} readOnly={true} lineNumbers={true} />}
+      main={<CodeMirrorWrapper text={source.text} highlighter={source.language} highlight={source.highlight} revealLine={source.revealLine} readOnly={true} lineNumbers={true} />}
       sidebar={<TabbedPane
         rightToolbar={selectedTab === 'locator' || selectedTab === 'aria' ? [<ToolbarButton key={1} icon='files' title='Copy' onClick={() => copy((selectedTab === 'locator' ? locator : ariaSnapshot) || '')} />] : []}
         tabs={[
           {
             id: 'locator',
             title: 'Locator',
-            render: () => <CodeMirrorWrapper text={locator} placeholder='Type locator to inspect' language={source.language} focusOnChange={true} onChange={onEditorChange} wrapLines={true} />
+            render: () => <CodeMirrorWrapper text={locator} placeholder='Type locator to inspect' highlighter={source.language} focusOnChange={true} onChange={onEditorChange} wrapLines={true} />
           },
           {
             id: 'log',
@@ -207,7 +234,7 @@ export const Recorder: React.FC<RecorderProps> = ({
           {
             id: 'aria',
             title: 'Aria',
-            render: () => <CodeMirrorWrapper text={ariaSnapshot || ''} placeholder='Type aria template to match' language={'yaml'} onChange={onAriaEditorChange} highlight={ariaSnapshotErrors} wrapLines={true} />
+            render: () => <CodeMirrorWrapper text={ariaSnapshot || ''} placeholder='Type aria template to match' highlighter={'yaml'} onChange={onAriaEditorChange} highlight={ariaSnapshotErrors} wrapLines={true} />
           },
         ]}
         selectedTab={selectedTab}

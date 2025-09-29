@@ -232,6 +232,16 @@ The options object can contain the URL so that only requests with the URL matchi
 
 Setting `update` option to true will create or update the HAR file with the actual network information instead of serving the requests from the HAR file. Use it when creating a test to populate the HAR with real data.
 
+#### 
+* langs: js
+
+Alternatively, you can also record HAR files by using the [`option: Browser.newContext.recordHar`] option in [`method: Browser.newContext`] when creating a browser context. This allows you to capture all network traffic for the entire context until the context is closed.
+
+#### 
+* langs: csharp, java, python
+
+Alternatively, you can also record HAR files by using the [`option: Browser.newContext.recordHarPath`] option in [`method: Browser.newContext`] when creating a browser context. This allows you to capture all network traffic for the entire context until the context is closed.
+
 ```js
 test('records or updates the HAR file', async ({ page }) => {
   // Get the response from the HAR file
@@ -438,7 +448,7 @@ Read more about [advanced networking](./network.md).
 
 ## Mock WebSockets
 
-The following code will intercept WebSocket connections and mock entire communcation over the WebSocket, instead of connecting to the server. This example responds to a `"request"` with a `"response"`.
+The following code will intercept WebSocket connections and mock entire communication over the WebSocket, instead of connecting to the server. This example responds to a `"request"` with a `"response"`.
 
 ```js
 await page.routeWebSocket('wss://example.com/ws', ws => {

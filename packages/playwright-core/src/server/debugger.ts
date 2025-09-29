@@ -15,10 +15,12 @@
  */
 
 import { EventEmitter } from 'events';
+
 import { debugMode, isUnderTest, monotonicTime } from '../utils';
 import { BrowserContext } from './browserContext';
+import { methodMetainfo } from '../utils/isomorphic/protocolMetainfo';
+
 import type { CallMetadata, InstrumentationListener, SdkObject } from './instrumentation';
-import { commandsWithTracingSnapshots, pausesBeforeInputActions, slowMoActions } from '../protocol/debug';
 
 const symbol = Symbol('Debugger');
 
@@ -32,7 +34,6 @@ export class Debugger extends EventEmitter implements InstrumentationListener {
     PausedStateChanged: 'pausedstatechanged'
   };
   private _muted = false;
-  private _slowMo: number | undefined;
 
   constructor(context: BrowserContext) {
     super();
@@ -45,7 +46,6 @@ export class Debugger extends EventEmitter implements InstrumentationListener {
     this._context.once(BrowserContext.Events.Close, () => {
       this._context.instrumentation.removeListener(this);
     });
-    this._slowMo = this._context._browser.options.slowMo;
   }
 
   async setMuted(muted: boolean) {
@@ -57,15 +57,6 @@ export class Debugger extends EventEmitter implements InstrumentationListener {
       return;
     if (shouldPauseOnCall(sdkObject, metadata) || (this._pauseOnNextStatement && shouldPauseBeforeStep(metadata)))
       await this.pause(sdkObject, metadata);
-  }
-
-  async _doSlowMo() {
-    await new Promise(f => setTimeout(f, this._slowMo));
-  }
-
-  async onAfterCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void> {
-    if (this._slowMo && shouldSlowMo(metadata))
-      await this._doSlowMo();
   }
 
   async onBeforeInputAction(sdkObject: SdkObject, metadata: CallMetadata): Promise<void> {
@@ -128,20 +119,8 @@ function shouldPauseOnCall(sdkObject: SdkObject, metadata: CallMetadata): boolea
 }
 
 function shouldPauseBeforeStep(metadata: CallMetadata): boolean {
-  // Don't stop on internal.
-  if (!metadata.apiName)
+  if (metadata.internal)
     return false;
-  // Always stop on 'close'
-  if (metadata.method === 'close')
-    return true;
-  if (metadata.method === 'waitForSelector' || metadata.method === 'waitForEventInfo' || metadata.method === 'querySelector' || metadata.method === 'querySelectorAll')
-    return false;  // Never stop on those, primarily for the test harness.
-  const step = metadata.type + '.' + metadata.method;
-  // Stop before everything that generates snapshot. But don't stop before those marked as pausesBeforeInputActions
-  // since we stop in them on a separate instrumentation signal.
-  return commandsWithTracingSnapshots.has(step) && !pausesBeforeInputActions.has(metadata.type + '.' + metadata.method);
-}
-
-export function shouldSlowMo(metadata: CallMetadata): boolean {
-  return slowMoActions.has(metadata.type + '.' + metadata.method);
+  const metainfo = methodMetainfo.get(metadata.type + '.' + metadata.method);
+  return !!metainfo?.pausesBeforeAction;
 }
