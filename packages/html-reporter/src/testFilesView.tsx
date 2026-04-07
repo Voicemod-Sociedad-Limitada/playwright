@@ -18,8 +18,9 @@ import type { FilteredStats, HTMLReport, TestFileSummary } from './types';
 import * as React from 'react';
 import { TestFileView } from './testFileView';
 import './testFileView.css';
-import { msToString } from './utils';
-import { AutoChip } from './chip';
+import './chip.css';
+import { msToString } from '@isomorphic/formatUtils';
+import { Chip } from './chip';
 import { CodeSnippet } from './testErrorView';
 import * as icons from './icons';
 import { isMetadataEmpty, MetadataView } from './metadataView';
@@ -27,39 +28,41 @@ import { HeaderView } from './headerView';
 import { clsx } from '@web/uiUtils';
 
 export const TestFilesView: React.FC<{
-  tests: TestFileSummary[],
+  files: TestFileSummary[],
   expandedFiles: Map<string, boolean>,
   setExpandedFiles: (value: Map<string, boolean>) => void,
   projectNames: string[],
-}> = ({ tests, expandedFiles, setExpandedFiles, projectNames }) => {
+}> = ({ files, expandedFiles, setExpandedFiles, projectNames }) => {
   const filteredFiles = React.useMemo(() => {
     const result: { file: TestFileSummary, defaultExpanded: boolean }[] = [];
     let visibleTests = 0;
-    for (const file of tests) {
+    for (const file of files) {
       visibleTests += file.tests.length;
       result.push({ file, defaultExpanded: visibleTests < 200 });
     }
     return result;
-  }, [tests]);
+  }, [files]);
   return <>
-    {filteredFiles.map(({ file, defaultExpanded }) => {
-      return <TestFileView
-        key={`file-${file.fileId}`}
-        file={file}
-        projectNames={projectNames}
-        isFileExpanded={fileId => {
-          const value = expandedFiles.get(fileId);
-          if (value === undefined)
-            return defaultExpanded;
-          return !!value;
-        }}
-        setFileExpanded={(fileId, expanded) => {
-          const newExpanded = new Map(expandedFiles);
-          newExpanded.set(fileId, expanded);
-          setExpandedFiles(newExpanded);
-        }}>
-      </TestFileView>;
-    })}
+    {filteredFiles.length > 0 ?
+      filteredFiles.map(({ file, defaultExpanded }) => {
+        return <TestFileView
+          key={`file-${file.fileId}`}
+          file={file}
+          projectNames={projectNames}
+          isFileExpanded={fileId => {
+            const value = expandedFiles.get(fileId);
+            if (value === undefined)
+              return defaultExpanded;
+            return !!value;
+          }}
+          setFileExpanded={(fileId, expanded) => {
+            const newExpanded = new Map(expandedFiles);
+            newExpanded.set(fileId, expanded);
+            setExpandedFiles(newExpanded);
+          }}>
+        </TestFileView>;
+      })
+      : <div className='chip-header test-file-no-files'>No tests found</div>}
   </>;
 };
 
@@ -68,7 +71,9 @@ export const TestFilesHeader: React.FC<{
   filteredStats?: FilteredStats,
   metadataVisible: boolean,
   toggleMetadataVisible: () => void,
-}> = ({ report, filteredStats, metadataVisible, toggleMetadataVisible }) => {
+  errorsVisible: boolean,
+  setErrorsVisible: (visible: boolean) => void,
+}> = ({ report, filteredStats, metadataVisible, toggleMetadataVisible, errorsVisible, setErrorsVisible }) => {
   if (!report)
     return null;
 
@@ -93,11 +98,11 @@ export const TestFilesHeader: React.FC<{
   </>;
 
   return <>
-    <HeaderView title={report.title} leftSuperHeader={leftSuperHeader} rightSuperHeader={rightSuperHeader} />
+    <HeaderView title={report.options.title} leftSuperHeader={leftSuperHeader} rightSuperHeader={rightSuperHeader} />
     {!isMetadataInTopLine && metadataToggleButton}
     {metadataVisible && <MetadataView metadata={report.metadata}/>}
-    {!!report.errors.length && <AutoChip header='Errors' dataTestId='report-errors'>
+    {!!report.errors.length && <Chip header='Errors' dataTestId='report-errors' expanded={errorsVisible} setExpanded={setErrorsVisible}>
       {report.errors.map((error, index) => <CodeSnippet key={'test-report-error-message-' + index} code={error}/>)}
-    </AutoChip>}
+    </Chip>}
   </>;
 };

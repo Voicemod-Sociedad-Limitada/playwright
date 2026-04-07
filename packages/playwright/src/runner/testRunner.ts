@@ -19,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { registry } from 'playwright-core/lib/server';
-import { ManualPromise, gracefullyProcessExitDoNotHang } from 'playwright-core/lib/utils';
+import { ManualPromise, gracefullyProcessExitDoNotHang, setPlaywrightTestProcessEnv } from 'playwright-core/lib/utils';
 
 import { loadConfig } from '../common/configLoader';
 import { Watcher } from '../fsWatcher';
@@ -39,21 +39,16 @@ import type { ConfigLocation, FullConfigInternal } from '../common/config';
 import type { ConfigCLIOverrides } from '../common/ipc';
 import type { TestRunnerPluginRegistration } from '../plugins';
 import type { AnyReporter } from '../reporters/reporterV2';
-
-export type RecoverFromStepErrorResult = {
-  stepId: string;
-  status: 'recovered' | 'failed';
-  value?: string | number | boolean | undefined;
-};
+import type { TestPausedParams } from './failureTracker';
 
 export const TestRunnerEvent = {
   TestFilesChanged: 'testFilesChanged',
-  RecoverFromStepError: 'recoverFromStepError',
+  TestPaused: 'testPaused',
 } as const;
 
 export type TestRunnerEventMap = {
   [TestRunnerEvent.TestFilesChanged]: [testFiles: string[]];
-  [TestRunnerEvent.RecoverFromStepError]: [stepId: string, message: string, location: reporterTypes.Location];
+  [TestRunnerEvent.TestPaused]: [params: TestPausedParams];
 };
 
 export type ListTestsParams = {
@@ -61,10 +56,12 @@ export type ListTestsParams = {
   locations?: string[];
   grep?: string;
   grepInvert?: string;
+  onlyChanged?: string;
 };
 
 export type RunTestsParams = {
-  locations?: string[];
+  timeout?: number;
+  locations: string[];
   grep?: string;
   grepInvert?: string;
   testIds?: string[];
@@ -78,9 +75,15 @@ export type RunTestsParams = {
   projects?: string[];
   reuseContext?: boolean;
   connectWsEndpoint?: string;
+  actionTimeout?: number;
+  pauseOnError?: boolean;
+  pauseAtEnd?: boolean;
+  doNotRunDepsOutsideProjectFilter?: boolean;
+  disableConfigReporters?: boolean;
+  failOnLoadErrors?: boolean;
 };
 
-type FullResultStatus = reporterTypes.FullResult['status'];
+export type FullResultStatus = reporterTypes.FullResult['status'];
 
 export class TestRunner extends EventEmitter<TestRunnerEventMap> {
   readonly configLocation: ConfigLocation;
@@ -98,8 +101,7 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
   private _plugins: TestRunnerPluginRegistration[] | undefined;
   private _watchTestDirs = false;
   private _populateDependenciesOnList = false;
-  private _recoverFromStepErrors = false;
-  private _resumeAfterStepErrors: Map<string, ManualPromise<RecoverFromStepErrorResult>> = new Map();
+  private _startingEnv: NodeJS.ProcessEnv = {};
 
   constructor(configLocation: ConfigLocation, configCLIOverrides: ConfigCLIOverrides) {
     super();
@@ -115,11 +117,11 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
   async initialize(params: {
     watchTestDirs?: boolean;
     populateDependenciesOnList?: boolean;
-    recoverFromStepErrors?: boolean;
   }) {
+    setPlaywrightTestProcessEnv();
     this._watchTestDirs = !!params.watchTestDirs;
     this._populateDependenciesOnList = !!params.populateDependenciesOnList;
-    this._recoverFromStepErrors = !!params.recoverFromStepErrors;
+    this._startingEnv = { ...process.env };
   }
 
   resizeTerminal(params: { cols: number, rows: number }) {
@@ -144,25 +146,39 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
 
   async installBrowsers() {
     const executables = registry.defaultExecutables();
-    await registry.install(executables, false);
+    await registry.install(executables);
   }
 
-  async runGlobalSetup(userReporters: AnyReporter[]): Promise<{ status: FullResultStatus }> {
+  async loadConfig() {
+    const { config, error } = await this._loadConfig(this._configCLIOverrides);
+    if (config)
+      return config;
+    throw new Error('Failed to load config: ' + (error ? error.message : 'Unknown error'));
+  }
+
+  async runGlobalSetup(userReporters: AnyReporter[]): Promise<{ status: FullResultStatus, env: [string, string | null][] }> {
     await this.runGlobalTeardown();
 
     const reporter = new InternalReporter(userReporters);
     const config = await this._loadConfigOrReportError(reporter, this._configCLIOverrides);
     if (!config)
-      return { status: 'failed' };
+      return { status: 'failed', env: [] };
 
     const { status, cleanup } = await runTasksDeferCleanup(new TestRun(config, reporter), [
       ...createGlobalSetupTasks(config),
     ]);
+
+    const env: [string, string | null][] = [];
+    for (const key of new Set([...Object.keys(process.env), ...Object.keys(this._startingEnv)])) {
+      if (this._startingEnv[key] !== process.env[key])
+        env.push([key, process.env[key] ?? null]);
+    }
+
     if (status !== 'passed')
       await cleanup();
     else
       this._globalSetup = { cleanup };
-    return { status };
+    return { status, env };
   }
 
   async runGlobalTeardown() {
@@ -255,6 +271,7 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
     config.cliGrep = params.grep;
     config.cliGrepInvert = params.grepInvert;
     config.cliProjectFilter = params.projects?.length ? params.projects : undefined;
+    config.cliOnlyChanged = params.onlyChanged;
     config.cliListOnly = true;
 
     const status = await runTasks(new TestRun(config, reporter), [
@@ -301,25 +318,23 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
       ...this._configCLIOverrides,
       repeatEach: 1,
       retries: 0,
+      timeout: params.timeout,
       preserveOutputDir: true,
       reporter: params.reporters ? params.reporters.map(r => [r]) : undefined,
       use: {
         ...this._configCLIOverrides.use,
-        ...(params.trace === 'on' ? { trace: { mode: 'on', sources: false, _live: true } } : {}),
+        ...(params.trace === 'on' ? { trace: { mode: 'on', sources: false, live: true } } : {}),
         ...(params.trace === 'off' ? { trace: 'off' } : {}),
         ...(params.video === 'on' || params.video === 'off' ? { video: params.video } : {}),
         ...(params.headed !== undefined ? { headless: !params.headed } : {}),
         _optionContextReuseMode: params.reuseContext ? 'when-possible' : undefined,
         _optionConnectOptions: params.connectWsEndpoint ? { wsEndpoint: params.connectWsEndpoint } : undefined,
+        actionTimeout: params.actionTimeout,
       },
       ...(params.updateSnapshots ? { updateSnapshots: params.updateSnapshots } : {}),
       ...(params.updateSourceMethod ? { updateSourceMethod: params.updateSourceMethod } : {}),
       ...(params.workers ? { workers: params.workers } : {}),
     };
-    if (params.trace === 'on')
-      process.env.PW_LIVE_TRACE_STACKS = '1';
-    else
-      process.env.PW_LIVE_TRACE_STACKS = undefined;
 
     const config = await this._loadConfigOrReportError(new InternalReporter([userReporter]), overrides);
     if (!config)
@@ -327,7 +342,7 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
 
     config.cliListOnly = false;
     config.cliPassWithNoTests = true;
-    config.cliArgs = params.locations || [];
+    config.cliArgs = params.locations;
     config.cliGrep = params.grep;
     config.cliGrepInvert = params.grepInvert;
     config.cliProjectFilter = params.projects?.length ? params.projects : undefined;
@@ -337,42 +352,22 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
       config.preOnlyTestFilters.push(test => testIdSet.has(test.id));
     }
 
-    const configReporters = await createReporters(config, 'test', true);
+    const configReporters = params.disableConfigReporters ? [] : await createReporters(config, 'test');
     const reporter = new InternalReporter([...configReporters, userReporter]);
     const stop = new ManualPromise();
     const tasks = [
       createApplyRebaselinesTask(),
-      createLoadTask('out-of-process', { filterOnly: true, failOnLoadErrors: false, doNotRunDepsOutsideProjectFilter: true }),
+      createLoadTask('out-of-process', { filterOnly: true, failOnLoadErrors: !!params.failOnLoadErrors, doNotRunDepsOutsideProjectFilter: params.doNotRunDepsOutsideProjectFilter }),
       ...createRunTestsTasks(config),
     ];
-    const testRun = new TestRun(config, reporter);
-    testRun.failureTracker.setRecoverFromStepErrorHandler(this._recoverFromStepError.bind(this));
+    const testRun = new TestRun(config, reporter, { pauseOnError: params.pauseOnError, pauseAtEnd: params.pauseAtEnd });
+    testRun.failureTracker.onTestPaused = params => this.emit(TestRunnerEvent.TestPaused, params);
     const run = runTasks(testRun, tasks, 0, stop).then(async status => {
       this._testRun = undefined;
       return status;
     });
     this._testRun = { run, stop };
     return { status: await run };
-  }
-
-  private async _recoverFromStepError(stepId: string, error: reporterTypes.TestError): Promise<RecoverFromStepErrorResult> {
-    if (!this._recoverFromStepErrors)
-      return { stepId, status: 'failed' };
-    const recoveryPromise = new ManualPromise<RecoverFromStepErrorResult>();
-    this._resumeAfterStepErrors.set(stepId, recoveryPromise);
-    if (!error?.message || !error?.location)
-      return { stepId, status: 'failed' };
-    this.emit(TestRunnerEvent.RecoverFromStepError, stepId, error.message, error.location);
-    const recoveredResult = await recoveryPromise;
-    if (recoveredResult.stepId !== stepId)
-      return { stepId, status: 'failed' };
-    return recoveredResult;
-  }
-
-  async resumeAfterStepError(params: RecoverFromStepErrorResult): Promise<void> {
-    const recoveryPromise = this._resumeAfterStepErrors.get(params.stepId);
-    if (recoveryPromise)
-      recoveryPromise.resolve(params);
   }
 
   async watch(fileNames: string[]) {
@@ -402,11 +397,14 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
   async stopTests() {
     this._testRun?.stop?.resolve();
     await this._testRun?.run;
-    this._resumeAfterStepErrors.clear();
   }
 
   async closeGracefully() {
     gracefullyProcessExitDoNotHang(0);
+  }
+
+  async stop() {
+    await this.runGlobalTeardown();
   }
 
   private async _loadConfig(overrides?: ConfigCLIOverrides): Promise<{ config: FullConfigInternal | null, error?: reporterTypes.TestError }> {
@@ -459,6 +457,8 @@ async function resolveCtDirs(config: FullConfigInternal) {
 }
 
 export async function runAllTestsWithConfig(config: FullConfigInternal): Promise<FullResultStatus> {
+  setPlaywrightTestProcessEnv();
+
   const listOnly = config.cliListOnly;
 
   addGitCommitInfoPlugin(config);
@@ -466,7 +466,7 @@ export async function runAllTestsWithConfig(config: FullConfigInternal): Promise
   // Legacy webServer support.
   webServerPluginsForConfig(config).forEach(p => config.plugins.push({ factory: p }));
 
-  const reporters = await createReporters(config, listOnly ? 'list' : 'test', false);
+  const reporters = await createReporters(config, listOnly ? 'list' : 'test');
   const lastRun = new LastRunReporter(config);
   if (config.cliLastFailed)
     await lastRun.filterLastFailed();
@@ -481,7 +481,9 @@ export async function runAllTestsWithConfig(config: FullConfigInternal): Promise
     createLoadTask('in-process', { filterOnly: true, failOnLoadErrors: true }),
     ...createRunTestsTasks(config),
   ];
-  const status = await runTasks(new TestRun(config, reporter), tasks, config.config.globalTimeout);
+
+  const testRun = new TestRun(config, reporter, { pauseAtEnd: config.configCLIOverrides.pause, pauseOnError: config.configCLIOverrides.pause });
+  const status = await runTasks(testRun, tasks, config.config.globalTimeout);
 
   // Calling process.exit() might truncate large stdout/stderr output.
   // See https://github.com/nodejs/node/issues/6456.

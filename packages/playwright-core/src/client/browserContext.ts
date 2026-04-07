@@ -22,7 +22,9 @@ import { ChannelOwner } from './channelOwner';
 import { evaluationScript } from './clientHelper';
 import { Clock } from './clock';
 import { ConsoleMessage } from './consoleMessage';
+import { Debugger } from './debugger';
 import { Dialog } from './dialog';
+import { DisposableObject, DisposableStub } from './disposable';
 import { TargetClosedError, parseError } from './errors';
 import { Events } from './events';
 import { APIRequestContext } from './fetch';
@@ -68,17 +70,18 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
   private _closedPromise: Promise<void>;
   readonly _options: channels.BrowserNewContextParams;
 
+  readonly debugger: Debugger;
   readonly request: APIRequestContext;
   readonly tracing: Tracing;
   readonly clock: Clock;
 
-  readonly _backgroundPages = new Set<Page>();
   readonly _serviceWorkers = new Set<Worker>();
   private _harRecorders = new Map<string, { path: string, content: 'embed' | 'attach' | 'omit' | undefined }>();
-  _closingStatus: 'none' | 'closing' | 'closed' = 'none';
+  private _closingStatus: 'none' | 'closing' | 'closed' = 'none';
   private _closeReason: string | undefined;
   private _harRouters: HarRouter[] = [];
   private _onRecorderEventSink: RecorderEventSink | undefined;
+
 
   static from(context: channels.BrowserContextChannel): BrowserContext {
     return (context as any)._object;
@@ -92,6 +95,7 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     super(parent, type, guid, initializer);
     this._options = initializer.options;
     this._timeoutSettings = new TimeoutSettings(this._platform);
+    this.debugger = Debugger.from(initializer.debugger);
     this.tracing = Tracing.from(initializer.tracing);
     this.request = APIRequestContext.from(initializer.requestContext);
     this.request._timeoutSettings = this._timeoutSettings;
@@ -102,11 +106,6 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     this._channel.on('page', ({ page }) => this._onPage(Page.from(page)));
     this._channel.on('route', ({ route }) => this._onRoute(network.Route.from(route)));
     this._channel.on('webSocketRoute', ({ webSocketRoute }) => this._onWebSocketRoute(network.WebSocketRoute.from(webSocketRoute)));
-    this._channel.on('backgroundPage', ({ page }) => {
-      const backgroundPage = Page.from(page);
-      this._backgroundPages.add(backgroundPage);
-      this.emit(Events.BrowserContext.BackgroundPage, backgroundPage);
-    });
     this._channel.on('serviceWorker', ({ worker }) => {
       const serviceWorker = Worker.from(worker);
       serviceWorker._context = this;
@@ -114,11 +113,19 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
       this.emit(Events.BrowserContext.ServiceWorker, serviceWorker);
     });
     this._channel.on('console', event => {
-      const consoleMessage = new ConsoleMessage(this._platform, event);
+      const worker = Worker.fromNullable(event.worker);
+      const page = Page.fromNullable(event.page);
+      const consoleMessage = new ConsoleMessage(this._platform, event, page, worker);
+      worker?.emit(Events.Worker.Console, consoleMessage);
+      page?.emit(Events.Page.Console, consoleMessage);
+      if (worker && this._serviceWorkers.has(worker)) {
+        const scope = this._serviceWorkerScope(worker);
+        for (const page of this._pages) {
+          if (scope && page.url().startsWith(scope))
+            page.emit(Events.Page.Console, consoleMessage);
+        }
+      }
       this.emit(Events.BrowserContext.Console, consoleMessage);
-      const page = consoleMessage.page();
-      if (page)
-        page.emit(Events.Page.Console, consoleMessage);
     });
     this._channel.on('pageError', ({ error, page }) => {
       const pageObject = Page.from(page);
@@ -225,7 +232,7 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     const routeHandlers = this._routes.slice();
     for (const routeHandler of routeHandlers) {
       // If the page or the context was closed we stall all requests right away.
-      if (page?._closeWasCalled || this._closingStatus !== 'none')
+      if (page?._closeWasCalled || this.isClosed())
         return;
       if (!routeHandler.matches(route.request().url()))
         continue;
@@ -260,6 +267,17 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     await bindingCall.call(func);
   }
 
+  private _serviceWorkerScope(serviceWorker: Worker) {
+    try {
+      let url = new URL('.', serviceWorker.url()).href;
+      if (!url.endsWith('/'))
+        url += '/';
+      return url;
+    } catch {
+      return null;
+    }
+  }
+
   setDefaultNavigationTimeout(timeout: number | undefined) {
     this._timeoutSettings.setDefaultNavigationTimeout(timeout);
   }
@@ -274,6 +292,10 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
 
   pages(): Page[] {
     return [...this._pages];
+  }
+
+  isClosed(): boolean {
+    return this._closingStatus !== 'none';
   }
 
   async newPage(): Promise<Page> {
@@ -333,25 +355,28 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     await this._channel.setHTTPCredentials({ httpCredentials: httpCredentials || undefined });
   }
 
-  async addInitScript(script: Function | string | { path?: string, content?: string }, arg?: any): Promise<void> {
+  async addInitScript(script: Function | string | { path?: string, content?: string }, arg?: any) {
     const source = await evaluationScript(this._platform, script, arg);
-    await this._channel.addInitScript({ source });
+    return DisposableObject.from((await this._channel.addInitScript({ source })).disposable);
   }
 
-  async exposeBinding(name: string, callback: (source: structs.BindingSource, ...args: any[]) => any, options: { handle?: boolean } = {}): Promise<void> {
-    await this._channel.exposeBinding({ name, needsHandle: options.handle });
+  async exposeBinding(name: string, callback: (source: structs.BindingSource, ...args: any[]) => any, options: { handle?: boolean } = {}): Promise<DisposableObject> {
+    const result = await this._channel.exposeBinding({ name, needsHandle: options.handle });
     this._bindings.set(name, callback);
+    return DisposableObject.from(result.disposable);
   }
 
-  async exposeFunction(name: string, callback: Function): Promise<void> {
-    await this._channel.exposeBinding({ name });
+  async exposeFunction(name: string, callback: Function): Promise<DisposableObject> {
+    const result = await this._channel.exposeBinding({ name });
     const binding = (source: structs.BindingSource, ...args: any[]) => callback(...args);
     this._bindings.set(name, binding);
+    return DisposableObject.from(result.disposable);
   }
 
-  async route(url: URLMatch, handler: network.RouteHandlerCallback, options: { times?: number } = {}): Promise<void> {
+  async route(url: URLMatch, handler: network.RouteHandlerCallback, options: { times?: number } = {}): Promise<DisposableStub> {
     this._routes.unshift(new network.RouteHandler(this._platform, this._options.baseURL, url, handler, options.times));
     await this._updateInterceptionPatterns({ title: 'Route requests' });
+    return new DisposableStub(() => this.unroute(url, handler));
   }
 
   async routeWebSocket(url: URLMatch, handler: network.WebSocketRouteHandlerCallback): Promise<void> {
@@ -455,8 +480,13 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     return state;
   }
 
+  async setStorageState(storageState: string | SetStorageState): Promise<void> {
+    const state = await prepareStorageState(this._platform, storageState);
+    await this._channel.setStorageState({ storageState: state });
+  }
+
   backgroundPages(): Page[] {
-    return [...this._backgroundPages];
+    return [];
   }
 
   serviceWorkers(): Worker[] {
@@ -486,7 +516,7 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
   }
 
   async close(options: { reason?: string } = {}): Promise<void> {
-    if (this._closingStatus !== 'none')
+    if (this.isClosed())
       return;
     this._closeReason = options.reason;
     this._closingStatus = 'closing';
@@ -525,6 +555,11 @@ export class BrowserContext extends ChannelOwner<channels.BrowserContextChannel>
     this._onRecorderEventSink = undefined;
     await this._channel.disableRecorder();
   }
+
+  async _exposeConsoleApi() {
+    await this._channel.exposeConsoleApi();
+  }
+
 }
 
 async function prepareStorageState(platform: Platform, storageState: string | SetStorageState): Promise<NonNullable<channels.BrowserNewContextParams['storageState']>> {

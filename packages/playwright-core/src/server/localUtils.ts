@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -22,8 +22,7 @@ import { calculateSha1 } from './utils/crypto';
 import { HarBackend } from './harBackend';
 import { ManualPromise } from '../utils/isomorphic/manualPromise';
 import { ZipFile } from './utils/zipFile';
-import { yauzl, yazl } from '../zipBundle';
-import { serializeClientSideCallMetadata } from '../utils/isomorphic/traceUtils';
+import { serializeClientSideCallMetadata } from '../utils/isomorphic/trace/traceUtils';
 import { assert } from '../utils/isomorphic/assert';
 import { removeFolders } from './utils/fileUtils';
 
@@ -38,10 +37,12 @@ export type StackSession = {
   writer: Promise<void>;
   tmpDir: string | undefined;
   callStacks: channels.ClientSideCallMetadata[];
+  live?: boolean;
 };
 
 export async function zip(progress: Progress, stackSessions: Map<string, StackSession>, params: channels.LocalUtilsZipParams): Promise<void> {
   const promise = new ManualPromise<void>();
+  const { yauzl, yazl } = await import('../zipBundle');
   const zipFile = new yazl.ZipFile();
   (zipFile as any as EventEmitter).on('error', error => promise.reject(error));
 
@@ -60,17 +61,13 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
   const stackSession = params.stacksId ? stackSessions.get(params.stacksId) : undefined;
   if (stackSession?.callStacks.length) {
     await progress.race(stackSession.writer);
-    if (process.env.PW_LIVE_TRACE_STACKS) {
-      zipFile.addFile(stackSession.file, 'trace.stacks');
-    } else {
-      const buffer = Buffer.from(JSON.stringify(serializeClientSideCallMetadata(stackSession.callStacks)));
-      zipFile.addBuffer(buffer, 'trace.stacks');
-    }
+    const buffer = Buffer.from(JSON.stringify(serializeClientSideCallMetadata(stackSession.callStacks)));
+    zipFile.addBuffer(buffer, 'trace.stacks');
   }
 
   // Collect sources from stacks.
   if (params.includeSources) {
-    const sourceFiles = new Set<string>();
+    const sourceFiles = new Set<string>(params.additionalSources);
     for (const { stack } of stackSession?.callStacks || []) {
       if (!stack)
         continue;
@@ -78,7 +75,7 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
         sourceFiles.add(file);
     }
     for (const sourceFile of sourceFiles)
-      addFile(sourceFile, 'resources/src@' + await calculateSha1(sourceFile) + '.txt');
+      addFile(sourceFile, 'resources/src@' + calculateSha1(sourceFile) + '.txt');
   }
 
   if (params.mode === 'write') {
@@ -198,7 +195,7 @@ export async function tracingStarted(progress: Progress, stackSessions: Map<stri
   if (!params.tracesDir)
     tmpDir = await progress.race(fs.promises.mkdtemp(path.join(os.tmpdir(), 'playwright-tracing-')));
   const traceStacksFile = path.join(params.tracesDir || tmpDir!, params.traceName + '.stacks');
-  stackSessions.set(traceStacksFile, { callStacks: [], file: traceStacksFile, writer: Promise.resolve(), tmpDir });
+  stackSessions.set(traceStacksFile, { callStacks: [], file: traceStacksFile, writer: Promise.resolve(), tmpDir, live: params.live });
   return { stacksId: traceStacksFile };
 }
 
@@ -209,7 +206,7 @@ export async function traceDiscarded(progress: Progress, stackSessions: Map<stri
 export function addStackToTracingNoReply(stackSessions: Map<string, StackSession>, params: channels.LocalUtilsAddStackToTracingNoReplyParams) {
   for (const session of stackSessions.values()) {
     session.callStacks.push(params.callData);
-    if (process.env.PW_LIVE_TRACE_STACKS) {
+    if (session.live) {
       session.writer = session.writer.then(() => {
         const buffer = Buffer.from(JSON.stringify(serializeClientSideCallMetadata(session.callStacks)));
         return fs.promises.writeFile(session.file, buffer);

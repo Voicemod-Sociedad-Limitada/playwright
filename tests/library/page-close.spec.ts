@@ -27,16 +27,6 @@ test('should close page with active dialog', async ({ page }) => {
   await page.close();
 });
 
-test('should not accept dialog after close', async ({ page, mode }) => {
-  test.fixme(mode.startsWith('service2'), 'Times out');
-  const promise = page.waitForEvent('dialog');
-  page.evaluate(() => alert()).catch(() => {});
-  const dialog = await promise;
-  await page.close();
-  const e = await dialog.dismiss().catch(e => e);
-  expect(e.message).toContain('Target page, context or browser has been closed');
-});
-
 test('expect should not print timed out error message when page closes', async ({ page }) => {
   await page.setContent('<div id=node>Text content</div>');
   const [error] = await Promise.all([
@@ -51,7 +41,7 @@ test('addLocatorHandler should throw when page closes', async ({ page, server })
   await page.goto(server.PREFIX + '/input/handle-locator.html');
 
   await page.addLocatorHandler(page.getByText('This interstitial covers the button'), async () => {
-    await page.close();
+    await page.close({ reason: 'custom reason' });
   });
 
   await page.locator('#aside').hover();
@@ -60,7 +50,7 @@ test('addLocatorHandler should throw when page closes', async ({ page, server })
     (window as any).setupAnnoyingInterstitial('mouseover', 1);
   });
   const error = await page.locator('#target').click().catch(e => e);
-  expect(error.message).toContain(kTargetClosedErrorMessage);
+  expect(error.message).toContain('custom reason');
 });
 
 test('should reject all promises when page is closed', async ({ page }) => {
@@ -140,7 +130,7 @@ test('should not throw UnhandledPromiseRejection when page closes', async ({ pag
   ]).catch(e => {});
 });
 
-test('interrupt request.response() and request.allHeaders() on page.close', async ({ page, server, browserName }) => {
+test('interrupt request.response() and request.allHeaders() on page.close', async ({ page, server, browserName, channel }) => {
   test.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/27227' });
   server.setRoute('/one-style.css', (req, res) => {
     res.setHeader('Content-Type', 'text/css');

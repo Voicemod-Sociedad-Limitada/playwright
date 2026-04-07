@@ -15,6 +15,7 @@
  */
 
 import { PlaywrightConnection, PlaywrightInitializeResult } from './playwrightConnection';
+import { WebSocketServerTransport } from './serverTransport';
 import { createPlaywright } from '../server/playwright';
 import { Semaphore } from '../utils/isomorphic/semaphore';
 import { DEFAULT_PLAYWRIGHT_LAUNCH_TIMEOUT } from '../utils/isomorphic/time';
@@ -39,7 +40,7 @@ type ServerOptions = {
   preLaunchedBrowser?: Browser;
   preLaunchedAndroidDevice?: AndroidDevice;
   preLaunchedSocksProxy?: SocksProxy;
-  debugController?: boolean;
+  artifactsDir?: string;
 };
 
 export class PlaywrightServer {
@@ -107,18 +108,9 @@ export class PlaywrightServer {
         const allowFSPaths = isExtension;
         launchOptions = filterLaunchOptions(launchOptions, allowFSPaths);
 
-        if (url.searchParams.has('debug-controller')) {
-          if (!(this._options.debugController || isExtension))
-            throw new Error('Debug controller is not enabled');
-          return new PlaywrightConnection(
-              controllerSemaphore,
-              ws,
-              true,
-              this._playwright,
-              async () => { throw new Error('shouldnt be used'); },
-              id,
-          );
-        }
+        // Always override artifacts dir with the one from server options.
+        if (this._options.artifactsDir)
+          launchOptions.artifactsDir = this._options.artifactsDir;
 
         if (isExtension) {
           const connectFilter = url.searchParams.get('connect');
@@ -127,7 +119,7 @@ export class PlaywrightServer {
               throw new Error(`Unknown connect filter: ${connectFilter}`);
             return new PlaywrightConnection(
                 browserSemaphore,
-                ws,
+                new WebSocketServerTransport(ws),
                 false,
                 this._playwright,
                 () => this._initConnectMode(id, connectFilter, browserName, launchOptions),
@@ -135,9 +127,19 @@ export class PlaywrightServer {
             );
           }
 
+          if (url.searchParams.has('debug-controller')) {
+            return new PlaywrightConnection(
+                controllerSemaphore,
+                new WebSocketServerTransport(ws),
+                true,
+                this._playwright,
+                async () => { throw new Error('shouldnt be used'); },
+                id,
+            );
+          }
           return new PlaywrightConnection(
               reuseBrowserSemaphore,
-              ws,
+              new WebSocketServerTransport(ws),
               false,
               this._playwright,
               () => this._initReuseBrowsersMode(browserName, launchOptions, id),
@@ -149,7 +151,7 @@ export class PlaywrightServer {
           if (this._options.preLaunchedBrowser) {
             return new PlaywrightConnection(
                 browserSemaphore,
-                ws,
+                new WebSocketServerTransport(ws),
                 false,
                 this._playwright,
                 () => this._initPreLaunchedBrowserMode(id),
@@ -159,7 +161,7 @@ export class PlaywrightServer {
 
           return new PlaywrightConnection(
               browserSemaphore,
-              ws,
+              new WebSocketServerTransport(ws),
               false,
               this._playwright,
               () => this._initPreLaunchedAndroidMode(id),
@@ -169,7 +171,7 @@ export class PlaywrightServer {
 
         return new PlaywrightConnection(
             browserSemaphore,
-            ws,
+            new WebSocketServerTransport(ws),
             false,
             this._playwright,
             () => this._initLaunchBrowserMode(browserName, proxyValue, launchOptions, id),
@@ -370,6 +372,7 @@ function filterLaunchOptions(options: LaunchOptionsWithTimeout, allowFSPaths: bo
     slowMo: options.slowMo,
     executablePath: (isUnderTest() || allowFSPaths) ? options.executablePath : undefined,
     downloadsPath: allowFSPaths ? options.downloadsPath : undefined,
+    artifactsDir: (isUnderTest() || allowFSPaths) ? options.artifactsDir : undefined,
   };
 }
 
@@ -379,11 +382,11 @@ const defaultLaunchOptions: Partial<LaunchOptionsWithTimeout> = {
   handleSIGTERM: false,
   handleSIGHUP: false,
   headless: true,
-  devtools: false,
 };
 
 const optionsThatAllowBrowserReuse: (keyof LaunchOptionsWithTimeout)[] = [
   'headless',
   'timeout',
   'tracesDir',
+  'artifactsDir',
 ];

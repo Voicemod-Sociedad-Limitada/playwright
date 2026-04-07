@@ -534,7 +534,7 @@ test('should nest steps based on zones', async ({ runInlineTest }) => {
             }),
             test.step('parent2', async () => {
               await test.step('child2', async () => {
-                await expect(page.locator('body')).toBeVisible();
+                await expect(page.locator('body').describe('main element')).toBeVisible();
               });
             }),
           ]);
@@ -557,12 +557,12 @@ pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
 test.step |grand @ a.test.ts:20
-test.step |  parent1 @ a.test.ts:22
+test.step |  parent1 @ a.test.ts:21
 test.step |    child1 @ a.test.ts:23
 pw:api    |      Click locator('body') @ a.test.ts:24
-test.step |  parent2 @ a.test.ts:27
+test.step |  parent2 @ a.test.ts:21
 test.step |    child2 @ a.test.ts:28
-expect    |      Expect "toBeVisible" @ a.test.ts:29
+expect    |      Expect "toBeVisible" main element @ a.test.ts:29
 hook      |After Hooks
 hook      |  afterEach hook @ a.test.ts:15
 test.step |    in afterEach @ a.test.ts:16
@@ -640,7 +640,7 @@ test('should not propagate errors from within toPass', async ({ runInlineTest })
   expect(result.exitCode).toBe(0);
   expect(result.output).toBe(`
 hook      |Before Hooks
-test.step |Expect "toPass" @ a.test.ts:7
+expect    |Expect "toPass" @ a.test.ts:7
 expect    |  Expect "toBe" @ a.test.ts:6
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality
 expect    |  Expect "toBe" @ a.test.ts:6
@@ -657,9 +657,9 @@ test('should show final toPass error', async ({ runInlineTest }) => {
     'a.test.ts': `
       import { test, expect } from '@playwright/test';
       test('fail', async () => {
-        await expect(() => {
+        await expect(async () => {
           expect(true).toBe(false);
-        }).toPass({ timeout: 1 });
+        }).toPass({ timeout: 2000, intervals: [10000] });
       });
     `
   }, { reporter: '' });
@@ -667,8 +667,8 @@ test('should show final toPass error', async ({ runInlineTest }) => {
   expect(result.exitCode).toBe(1);
   expect(stripAnsi(result.output)).toBe(`
 hook      |Before Hooks
-test.step |Expect "toPass" @ a.test.ts:6
-test.step |↪ error: Error: expect(received).toBe(expected) // Object.is equality
+expect    |Expect "toPass" @ a.test.ts:6
+expect    |↪ error: Error: expect(received).toBe(expected) // Object.is equality
 expect    |  Expect "toBe" @ a.test.ts:5
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality
 hook      |After Hooks
@@ -785,16 +785,16 @@ hook      |Before Hooks
 test.step |boxed step @ a.test.ts:3
 test.step |↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:4
 test.step |    at a.test.ts:4:27
-test.step |    at a.test.ts:3:26
+test.step |    at a.test.ts:3:15
 expect    |  Expect "toBe" @ a.test.ts:4
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:4
 expect    |      at a.test.ts:4:27
-expect    |      at a.test.ts:3:26
+expect    |      at a.test.ts:3:15
 hook      |After Hooks
 hook      |Worker Cleanup
           |Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:4
           |    at a.test.ts:4:27
-          |    at a.test.ts:3:26
+          |    at a.test.ts:3:15
 `);
 });
 
@@ -820,14 +820,14 @@ test('should step w/ box', async ({ runInlineTest }) => {
 hook      |Before Hooks
 test.step |boxed step @ a.test.ts:8
 test.step |↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-test.step |    at a.test.ts:8:21
+test.step |    at a.test.ts:8:15
 expect    |  Expect "toBe" @ a.test.ts:5
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-expect    |      at a.test.ts:8:21
+expect    |      at a.test.ts:8:15
 hook      |After Hooks
 hook      |Worker Cleanup
           |Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-          |    at a.test.ts:8:21
+          |    at a.test.ts:8:15
 `);
 });
 
@@ -853,14 +853,14 @@ test('should soft step w/ box', async ({ runInlineTest }) => {
 hook      |Before Hooks
 test.step |boxed step @ a.test.ts:8
 test.step |↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-test.step |    at a.test.ts:8:21
+test.step |    at a.test.ts:8:15
 expect    |  Expect "soft toBe" @ a.test.ts:5
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-expect    |      at a.test.ts:8:21
+expect    |      at a.test.ts:8:15
 hook      |After Hooks
 hook      |Worker Cleanup
           |Error: expect(received).toBe(expected) // Object.is equality @ a.test.ts:8
-          |    at a.test.ts:8:21
+          |    at a.test.ts:8:15
 `);
 });
 
@@ -892,7 +892,7 @@ pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
 pw:api    |Set content @ a.test.ts:4
-expect    |Checking color @ a.test.ts:6
+expect    |Checking color locator('div') @ a.test.ts:6
 hook      |After Hooks
 fixture   |  Fixture "page"
 fixture   |  Fixture "context"
@@ -934,7 +934,7 @@ test('step inside toPass', async ({ runInlineTest }) => {
   expect(stripAnsi(result.output)).toBe(`
 hook      |Before Hooks
 test.step |step 1 @ a.test.ts:4
-test.step |  Expect "toPass" @ a.test.ts:11
+expect    |  Expect "toPass" @ a.test.ts:11
 test.step |    step 2, attempt: 0 @ a.test.ts:7
 test.step |    ↪ error: Error: expect(received).toBe(expected) // Object.is equality
 expect    |      Expect "toBe" @ a.test.ts:9
@@ -981,7 +981,7 @@ fixture   |  Fixture "context"
 pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
-test.step |Expect "toPass" @ a.test.ts:11
+expect    |Expect "toPass" @ a.test.ts:11
 pw:api    |  Navigate to "about:blank" @ a.test.ts:6
 test.step |  inner step attempt: 0 @ a.test.ts:7
 test.step |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality
@@ -1033,7 +1033,7 @@ fixture   |  Fixture "context"
 pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
-test.step |Expect "poll toHaveLength" @ a.test.ts:14
+expect    |Expect "poll toHaveLength" @ a.test.ts:14
 pw:api    |  Navigate to "about:blank" @ a.test.ts:7
 test.step |  inner step attempt: 0 @ a.test.ts:8
 expect    |    Expect "toBe" @ a.test.ts:10
@@ -1086,15 +1086,15 @@ pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
 pw:api    |Set content @ a.test.ts:4
-test.step |Expect "poll toBe" @ a.test.ts:13
-expect    |  Expect "toHaveText" @ a.test.ts:7
+expect    |Expect "poll toBe" @ a.test.ts:13
+expect    |  Expect "toHaveText" locator('div') @ a.test.ts:7
 test.step |  iteration 1 @ a.test.ts:9
-expect    |    Expect "toBeVisible" @ a.test.ts:10
+expect    |    Expect "toBeVisible" locator('div') @ a.test.ts:10
 expect    |  Expect "toBe" @ a.test.ts:6
 expect    |  ↪ error: Error: expect(received).toBe(expected) // Object.is equality
-expect    |  Expect "toHaveText" @ a.test.ts:7
+expect    |  Expect "toHaveText" locator('div') @ a.test.ts:7
 test.step |  iteration 2 @ a.test.ts:9
-expect    |    Expect "toBeVisible" @ a.test.ts:10
+expect    |    Expect "toBeVisible" locator('div') @ a.test.ts:10
 expect    |  Expect "toBe" @ a.test.ts:6
 hook      |After Hooks
 fixture   |  Fixture "page"
@@ -1451,7 +1451,7 @@ pw:api    |  Wait for event "response" @ a.test.ts:7
 pw:api    |  Click locator('div') @ a.test.ts:14
 pw:api    |  Get content @ a.test.ts:8
 pw:api    |  Get content @ a.test.ts:9
-expect    |  Expect "toContainText" @ a.test.ts:10
+expect    |  Expect "toContainText" locator('div') @ a.test.ts:10
 expect    |Expect "toBe" @ a.test.ts:18
 hook      |After Hooks
 fixture   |  Fixture "page"
@@ -1745,8 +1745,8 @@ pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
 pw:api    |Set content @ a.test.ts:16
-expect    |Expect "toBeInvisible" @ a.test.ts:17
-test.step |  Expect "poll toBe" @ a.test.ts:7
+expect    |Expect "toBeInvisible" locator('div') @ a.test.ts:17
+expect    |  Expect "poll toBe" @ a.test.ts:7
 pw:api    |    Query count locator('div').filter({ visible: true }) @ a.test.ts:7
 expect    |    Expect "toBe" @ a.test.ts:7
 expect    |    ↪ error: Error: expect(received).toBe(expected) // Object.is equality
@@ -1770,7 +1770,7 @@ pw:api    |    Close context
 `);
 });
 
-test('should box fixtures with everything inside them', async ({ runInlineTest }) => {
+test('should box fixtures', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'reporter.ts': stepIndentReporter,
     'playwright.config.ts': `module.exports = { reporter: './reporter' };`,
@@ -1784,6 +1784,7 @@ test('should box fixtures with everything inside them', async ({ runInlineTest }
             await page.goto('data:text/html,<div>here we go</div>');
           });
           await use(1);
+          await page.setContent('<div>here we go</div>');
         }, { box: true }],
         bar: [async ({ page }, use) => {
           await page.setContent('<div>here we go</div>');
@@ -1791,13 +1792,23 @@ test('should box fixtures with everything inside them', async ({ runInlineTest }
             await page.goto('data:text/html,<div>here we go</div>');
           });
           await use(2);
+          await page.setContent('<div>here we go</div>');
         }, { box: false }],
+        baz: [async ({ page }, use) => {
+          await page.setContent('<div>here we go</div>');
+          await test.step('inner step', async () => {
+            await page.goto('data:text/html,<div>here we go</div>');
+          });
+          await use(3);
+          await page.setContent('<div>here we go</div>');
+        }, { box: 'self' }],
       });
 
-      test('test', async ({ foo, bar, page }) => {
+      test('test', async ({ foo, bar, baz, page }) => {
         await expect(page.locator('body')).toBeVisible();
         expect(foo).toBe(1);
         expect(bar).toBe(2);
+        expect(baz).toBe(3);
       });
     `
   }, { reporter: '' });
@@ -1812,14 +1823,20 @@ pw:api    |    Create context
 fixture   |  Fixture "page"
 pw:api    |    Create page
 fixture   |  Fixture "bar" @ a.test.ts:4
-pw:api    |    Set content @ a.test.ts:13
-test.step |    inner step @ a.test.ts:14
-pw:api    |      Navigate to "data:" @ a.test.ts:15
-expect    |Expect "toBeVisible" @ a.test.ts:22
-expect    |Expect "toBe" @ a.test.ts:23
-expect    |Expect "toBe" @ a.test.ts:24
+pw:api    |    Set content @ a.test.ts:14
+test.step |    inner step @ a.test.ts:15
+pw:api    |      Navigate to "data:" @ a.test.ts:16
+pw:api    |  Set content @ a.test.ts:22
+test.step |  inner step @ a.test.ts:23
+pw:api    |    Navigate to "data:" @ a.test.ts:24
+expect    |Expect "toBeVisible" locator('body') @ a.test.ts:32
+expect    |Expect "toBe" @ a.test.ts:33
+expect    |Expect "toBe" @ a.test.ts:34
+expect    |Expect "toBe" @ a.test.ts:35
 hook      |After Hooks
+pw:api    |  Set content @ a.test.ts:27
 fixture   |  Fixture "bar" @ a.test.ts:4
+pw:api    |    Set content @ a.test.ts:19
 fixture   |  Fixture "page"
 fixture   |  Fixture "context"
 pw:api    |    Close context

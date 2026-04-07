@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -130,7 +130,7 @@ class SocksProxyConnection {
   async connect() {
     const proxyAgent = this.socksProxy.getProxyAgent(this.host, this.port);
     if (proxyAgent)
-      this._serverEncrypted = await proxyAgent.callback(new EventEmitter() as any, { host: rewriteToLocalhostIfNeeded(this.host), port: this.port, secureEndpoint: false });
+      this._serverEncrypted = await proxyAgent.connect(new EventEmitter() as any, { host: rewriteToLocalhostIfNeeded(this.host), port: this.port, secureEndpoint: false });
     else
       this._serverEncrypted = await createSocket(rewriteToLocalhostIfNeeded(this.host), this.port);
 

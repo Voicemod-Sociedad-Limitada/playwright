@@ -16,24 +16,7 @@
 
 import { stringifyStackFrames } from 'playwright-core/lib/utils';
 
-import type { ExpectMatcherState } from '../../types/test';
 import type { StackFrame } from '@protocol/channels';
-import type { Locator } from 'playwright-core';
-
-export const kNoElementsFoundError = '<element(s) not found>';
-
-export function matcherHint(state: ExpectMatcherState, locator: Locator | undefined, matcherName: string, expression: any, actual: any, matcherOptions: any, timeout: number | undefined, expectedReceivedString?: string, preventExtraStatIndent: boolean = false) {
-  let header = state.utils.matcherHint(matcherName, expression, actual, matcherOptions).replace(/ \/\/ deep equality/, '') + ' failed\n\n';
-  // Extra space added after locator and timeout to match Jest's received/expected output
-  const extraSpace = preventExtraStatIndent ? '' : ' ';
-  if (locator)
-    header += `Locator: ${extraSpace}${String(locator)}\n`;
-  if (expectedReceivedString)
-    header += `${expectedReceivedString}\n`;
-  if (timeout)
-    header += `Timeout: ${extraSpace}${timeout}ms\n`;
-  return header;
-}
 
 export type MatcherResult<E, A> = {
   name: string;
@@ -71,5 +54,5 @@ export class ExpectError extends Error {
 }
 
 export function isJestError(e: unknown): e is JestError {
-  return e instanceof Error && 'matcherResult' in e;
+  return e instanceof Error && 'matcherResult' in e && !!e.matcherResult;
 }

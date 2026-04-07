@@ -20,30 +20,28 @@ import * as React from 'react';
 import { TabbedPane } from './tabbedPane';
 import { AutoChip } from './chip';
 import './common.css';
-import { Link, SearchParamsContext, testResultHref, TraceLink } from './links';
+import { Link, testResultHref, TraceLink, useSearchParams } from './links';
 import { statusIcon } from './statusIcon';
 import './testCaseView.css';
 import { TestResultView } from './testResultView';
 import { linkifyText } from '@web/renderUtils';
-import { msToString } from './utils';
+import { msToString } from '@isomorphic/formatUtils';
 import { clsx } from '@web/uiUtils';
 import { CopyToClipboardContainer } from './copyToClipboard';
 import { HeaderView } from './headerView';
-import type { MetadataWithCommitInfo } from '@playwright/isomorphic/types';
 import { ProjectAndTagLabelsView } from './labels';
+import type { LoadedReport } from './loadedReport';
 
 export const TestCaseView: React.FC<{
-  projectNames: string[],
+  report: LoadedReport,
   test: TestCase,
-  testRunMetadata: MetadataWithCommitInfo | undefined,
   next: TestCaseSummary | undefined,
   prev: TestCaseSummary | undefined,
   run: number,
-}> = ({ projectNames, test, testRunMetadata, run, next, prev }) => {
+}> = ({ report, test, run, next, prev }) => {
   const [selectedResultIndex, setSelectedResultIndex] = React.useState(run);
-  const searchParams = React.useContext(SearchParamsContext);
+  const searchParams = useSearchParams();
 
-  const filterParam = searchParams.has('q') ? '&q=' + searchParams.get('q') : '';
   const visibleTestAnnotations = test.annotations.filter(a => !a.type.startsWith('_')) ?? [];
 
   return <>
@@ -51,9 +49,9 @@ export const TestCaseView: React.FC<{
       title={test.title}
       leftSuperHeader={<div className='test-case-path'>{test.path.join(' › ')}</div>}
       rightSuperHeader={<>
-        <div className={clsx(!prev && 'hidden')}><Link href={testResultHref({ test: prev }) + filterParam}>« previous</Link></div>
+        <div className={clsx(!prev && 'hidden')}><Link href={testResultHref({ test: prev }, searchParams)}>« previous</Link></div>
         <div style={{ width: 10 }}></div>
-        <div className={clsx(!next && 'hidden')}><Link href={testResultHref({ test: next }) + filterParam}>next »</Link></div>
+        <div className={clsx(!next && 'hidden')}><Link href={testResultHref({ test: next }, searchParams)}>next »</Link></div>
       </>}
     />
     <div className='hbox' style={{ lineHeight: '24px' }}>
@@ -66,7 +64,8 @@ export const TestCaseView: React.FC<{
       <TraceLink test={test} trailingSeparator={true} />
       <div className='test-case-duration'>{msToString(test.duration)}</div>
     </div>
-    <ProjectAndTagLabelsView style={{ marginLeft: '6px' }} projectNames={projectNames} activeProjectName={test.projectName} otherLabels={test.tags} />
+    <ProjectAndTagLabelsView style={{ marginLeft: '6px' }} projectNames={report.json().projectNames} activeProjectName={test.projectName} otherLabels={test.tags} />
+    {/* If there are no results, display test annotations. Otherwise test annotations will be displayed alongside runtime annotations in individual result pane */}
     {test.results.length === 0 && visibleTestAnnotations.length !== 0 && <AutoChip header='Annotations' dataTestId='test-case-annotations'>
       {visibleTestAnnotations.map((annotation, index) => <TestCaseAnnotationView key={index} annotation={annotation} />)}
     </AutoChip>}
@@ -83,7 +82,7 @@ export const TestCaseView: React.FC<{
             {!!visibleAnnotations.length && <AutoChip header='Annotations' dataTestId='test-case-annotations'>
               {visibleAnnotations.map((annotation, index) => <TestCaseAnnotationView key={index} annotation={annotation} />)}
             </AutoChip>}
-            <TestResultView test={test!} result={result} testRunMetadata={testRunMetadata} />
+            <TestResultView test={test!} result={result} report={report} />
           </>;
         },
       })) || []} selectedTab={String(selectedResultIndex)} setSelectedTab={id => setSelectedResultIndex(+id)} />

@@ -16,9 +16,10 @@
 
 import type { Fixtures, FrameLocator, Locator, Page, Browser, BrowserContext } from '@playwright/test';
 import { step } from './baseTest';
-import { runTraceViewerApp } from '../../packages/playwright-core/lib/server';
+import path from 'path';
+import { CommonFixtures, TestChildProcess } from './commonFixtures';
 
-type BaseTestFixtures = {
+type BaseTestFixtures = CommonFixtures & {
   context: BrowserContext;
 };
 
@@ -30,7 +31,7 @@ type BaseWorkerFixtures = {
 };
 
 export type TraceViewerFixtures = {
-  showTraceViewer: (trace: string[], options?: {host?: string, port?: number}) => Promise<TraceViewerPage>;
+  showTraceViewer: (trace: string | undefined, options?: {host?: string, port?: number, stdin?: boolean}) => Promise<TraceViewerPage>;
   runAndTrace: (body: () => Promise<void>, optsOverrides?: Parameters<BrowserContext['tracing']['start']>[0]) => Promise<TraceViewerPage>;
 };
 
@@ -47,12 +48,13 @@ class TraceViewerPage {
   metadataTab: Locator;
   snapshotContainer: Locator;
   sourceCodeTab: Locator;
+  networkTab: Locator;
 
   settingsDialog: Locator;
-  darkModeSetting: Locator;
+  themeSetting: Locator;
   displayCanvasContentSetting: Locator;
 
-  constructor(public page: Page) {
+  constructor(public page: Page, public process: TestChildProcess) {
     this.actionTitles = page.locator('.action-title');
     this.actionsTree = page.getByTestId('actions-tree');
     this.callLines = page.locator('.call-tab .call-line');
@@ -65,19 +67,20 @@ class TraceViewerPage {
     this.snapshotContainer = page.locator('.snapshot-container iframe.snapshot-visible[name=snapshot]');
     this.metadataTab = page.getByRole('tabpanel', { name: 'Metadata' });
     this.sourceCodeTab = page.getByRole('tabpanel', { name: 'Source' });
+    this.networkTab = page.getByRole('tabpanel', { name: 'Network' });
 
     this.settingsDialog = page.getByTestId('settings-toolbar-dialog');
-    this.darkModeSetting = page.locator('.setting').getByText('Dark mode');
+    this.themeSetting = this.settingsDialog.getByRole('combobox', { name: 'Theme' });
     this.displayCanvasContentSetting = page.locator('.setting').getByText('Display canvas content');
   }
 
   @step
   async showAllActions() {
-    await this.page.getByRole('button', { name: 'Settings' }).click();
-    await this.page.locator('.setting').getByText('Show route actions').click();
-    await this.page.locator('.setting').getByText('Show getter actions').click();
-    await this.page.locator('.setting').getByText('Show configuration actions').click();
-    await this.page.getByRole('button', { name: 'Settings' }).click();
+    await this.page.getByRole('button', { name: 'Filter actions' }).click();
+    await this.page.locator('.setting').getByText('Network routes').click();
+    await this.page.locator('.setting').getByText('Getters').click();
+    await this.page.locator('.setting').getByText('Configuration').click();
+    await this.page.getByRole('button', { name: 'Filter actions' }).click();
   }
 
   stackFrames(options: { selected?: boolean } = {}) {
@@ -150,21 +153,35 @@ class TraceViewerPage {
 }
 
 export const traceViewerFixtures: Fixtures<TraceViewerFixtures, {}, BaseTestFixtures, BaseWorkerFixtures> = {
-  showTraceViewer: async ({ playwright, browserName, headless }, use, testInfo) => {
+  showTraceViewer: async ({ playwright, childProcess, browserName }, use) => {
     const browsers: Browser[] = [];
-    const contextImpls: any[] = [];
-    await use(async (traces: string[], { host, port } = {}) => {
-      const pageImpl = await runTraceViewerApp(traces, browserName, { headless, host, port });
-      const contextImpl = pageImpl.browserContext;
-      const browser = await playwright.chromium.connectOverCDP(contextImpl._browser.options.wsEndpoint);
+    await use(async (trace: string | undefined, { host, port, stdin } = {}) => {
+      const command = [
+        'node',
+        path.join(__dirname, '../../packages/playwright-core/cli.js'),
+        'show-trace',
+        '--port', '' + (port ?? '0'),
+      ];
+      if (host)
+        command.push('--host', host);
+      if (stdin)
+        command.push('--stdin');
+      if (trace)
+        command.push(trace);
+      const cp = childProcess({ command });
+      await cp.waitForOutput('Listening on');
+      const browser = await playwright.chromium.launch({
+        ...(browserName === 'chromium' ? {} : { channel: 'chromium' }),
+        executablePath: process.env.CRPATH, // without this, setting FFPATH makes us launch Firefox with Chromium args
+      });
       browsers.push(browser);
-      contextImpls.push(contextImpl);
-      return new TraceViewerPage(browser.contexts()[0].pages()[0]);
+      const page = await browser.newPage();
+      const url = cp.output.match(/Listening on (http:\/\/[^\s]+)/)![1];
+      await page.goto(url);
+      return new TraceViewerPage(page, cp);
     });
     for (const browser of browsers)
       await browser.close();
-    for (const contextImpl of contextImpls)
-      await contextImpl._browser.close({ reason: 'Trace viewer closed' });
   },
 
   runAndTrace: async ({ context, showTraceViewer }, use, testInfo) => {
@@ -173,7 +190,7 @@ export const traceViewerFixtures: Fixtures<TraceViewerFixtures, {}, BaseTestFixt
       await context.tracing.start({ snapshots: true, screenshots: true, sources: true, ...optsOverrides });
       await body();
       await context.tracing.stop({ path: traceFile });
-      return showTraceViewer([traceFile]);
+      return showTraceViewer(traceFile);
     });
   },
 };

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+import fs from 'fs';
 import { calculateSha1 } from 'playwright-core/lib/utils';
 
 import { loadReporter } from './loadUtils';
@@ -36,7 +36,7 @@ import type { BuiltInReporter, FullConfigInternal } from '../common/config';
 import type { CommonReporterOptions, Screen } from '../reporters/base';
 import type { ReporterV2 } from '../reporters/reporterV2';
 
-export async function createReporters(config: FullConfigInternal, mode: 'list' | 'test' | 'merge', isTestServer: boolean, descriptions?: ReporterDescription[]): Promise<ReporterV2[]> {
+export async function createReporters(config: FullConfigInternal, mode: 'list' | 'test' | 'merge', descriptions?: ReporterDescription[]): Promise<ReporterV2[]> {
   const defaultReporters: { [key in BuiltInReporter]: new(arg: any) => ReporterV2 } = {
     blob: BlobReporter,
     dot: mode === 'list' ? ListModeReporter : DotReporter,
@@ -52,7 +52,7 @@ export async function createReporters(config: FullConfigInternal, mode: 'list' |
   descriptions ??= config.config.reporter;
   if (config.configCLIOverrides.additionalReporters)
     descriptions = [...descriptions, ...config.configCLIOverrides.additionalReporters];
-  const runOptions = reporterOptions(config, mode, isTestServer);
+  const runOptions = reporterOptions(config, mode);
   for (const r of descriptions) {
     const [name, arg] = r;
     const options = { ...runOptions, ...arg };
@@ -103,11 +103,10 @@ export function createErrorCollectingReporter(screen: Screen): ErrorCollectingRe
   };
 }
 
-function reporterOptions(config: FullConfigInternal, mode: 'list' | 'test' | 'merge', isTestServer: boolean): CommonReporterOptions {
+function reporterOptions(config: FullConfigInternal, mode: 'list' | 'test' | 'merge'): CommonReporterOptions {
   return {
     configDir: config.configDir,
     _mode: mode,
-    _isTestServer: isTestServer,
     _commandHash: computeCommandHash(config),
   };
 }
@@ -126,6 +125,12 @@ function computeCommandHash(config: FullConfigInternal) {
     command.cliGrepInvert = config.cliGrepInvert;
   if (config.cliOnlyChanged)
     command.cliOnlyChanged = config.cliOnlyChanged;
+  if (config.config.tags.length)
+    command.tags = config.config.tags.join(' ');
+  if (config.cliTestList)
+    command.cliTestList = calculateSha1(fs.readFileSync(config.cliTestList));
+  if (config.cliTestListInvert)
+    command.cliTestListInvert = calculateSha1(fs.readFileSync(config.cliTestListInvert));
   if (Object.keys(command).length)
     parts.push(calculateSha1(JSON.stringify(command)).substring(0, 7));
   return parts.join('-');

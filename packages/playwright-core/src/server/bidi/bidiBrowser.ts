@@ -41,6 +41,7 @@ export class BidiBrowser extends Browser {
   readonly _contexts = new Map<string, BidiBrowserContext>();
   readonly _bidiPages = new Map<bidi.BrowsingContext.BrowsingContext, BidiPage>();
   private readonly _eventListeners: RegisteredListener[];
+  private _cacheBehavior: bidi.Network.SetCacheBehaviorParameters['cacheBehavior'] = 'default';
 
   static async connect(parent: SdkObject, transport: ConnectionTransport, options: BrowserOptions): Promise<BidiBrowser> {
     const browser = new BidiBrowser(parent, transport, options);
@@ -50,12 +51,16 @@ export class BidiBrowser extends Browser {
     browser._bidiSessionInfo = await browser._browserSession.send('session.new', {
       capabilities: {
         alwaysMatch: {
-          acceptInsecureCerts: options.persistent?.internalIgnoreHTTPSErrors || options.persistent?.ignoreHTTPSErrors,
-          proxy: getProxyConfiguration(options.originalLaunchOptions.proxyOverride ?? options.proxy),
-          unhandledPromptBehavior: {
+          'acceptInsecureCerts': options.persistent?.internalIgnoreHTTPSErrors || options.persistent?.ignoreHTTPSErrors,
+          'proxy': getProxyConfiguration(options.originalLaunchOptions.proxyOverride ?? options.proxy),
+          'unhandledPromptBehavior': {
             default: bidi.Session.UserPromptHandlerType.Ignore,
           },
-          webSocketUrl: true
+          'webSocketUrl': true,
+          // Chrome with WebDriver BiDi does not support prerendering
+          // yet because WebDriver BiDi behavior is not specified. See
+          // https://github.com/w3c/webdriver-bidi/issues/321.
+          'goog:prerenderingDisabled': true,
         },
       }
     });
@@ -66,7 +71,15 @@ export class BidiBrowser extends Browser {
         'network',
         'log',
         'script',
+        'input',
       ],
+    });
+
+    await browser._browserSession.send('network.addIntercept', { phases: [bidi.Network.InterceptPhase.AuthRequired] });
+
+    await browser._browserSession.send('network.addDataCollector', {
+      dataTypes: [bidi.Network.DataType.Response],
+      maxEncodedDataSize: 20_000_000, // same default as in CDP: https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/inspector/inspector_network_agent.cc;l=134;drc=4128411589187a396829a827f59a655bed876aa7
     });
 
     if (options.persistent) {
@@ -122,18 +135,26 @@ export class BidiBrowser extends Browser {
     return !this._connection.isClosed();
   }
 
+  async updateCacheBehavior() {
+    const cacheBehavior = [...this._contexts.values()].some(context => context.requestInterceptors.length > 0) ? 'bypass' : 'default';
+    if (this._cacheBehavior !== cacheBehavior) {
+      await this._browserSession.send('network.setCacheBehavior', { cacheBehavior });
+      this._cacheBehavior = cacheBehavior;
+    }
+  }
+
   private _onBrowsingContextCreated(event: bidi.BrowsingContext.Info) {
     if (event.parent) {
       const parentFrameId = event.parent;
-      for (const page of this._bidiPages.values()) {
-        const parentFrame = page._page.frameManager.frame(parentFrameId);
-        if (!parentFrame)
-          continue;
+      const page = this._findPageForFrame(parentFrameId);
+      if (page) {
         page._session.addFrameBrowsingContext(event.context);
-        page._page.frameManager.frameAttached(event.context, parentFrameId);
-        const frame = page._page.frameManager.frame(event.context);
-        if (frame)
-          frame._url = event.url;
+        const frame = page._page.frameManager.frameAttached(event.context, parentFrameId);
+        frame._url = event.url;
+        page._getFrameNode(frame).then(node => {
+          const attributes = node?.value?.attributes;
+          frame._name = attributes?.name ?? attributes?.id ?? '';
+        }, () => {});
         return;
       }
       return;
@@ -143,8 +164,9 @@ export class BidiBrowser extends Browser {
       context = this._defaultContext as BidiBrowserContext;
     if (!context)
       return;
+    context.doGrantGlobalPermissionsForURL(event.url);
     const session = this._connection.createMainFrameBrowsingContextSession(event.context);
-    const opener = event.originalOpener && this._bidiPages.get(event.originalOpener);
+    const opener = event.originalOpener && this._findPageForFrame(event.originalOpener);
     const page = new BidiPage(context, session, opener || null);
     page._page.mainFrame()._url = event.url;
     this._bidiPages.set(event.context, page);
@@ -176,12 +198,20 @@ export class BidiBrowser extends Browser {
         return;
     }
   }
+
+  private _findPageForFrame(frameId: string) {
+    for (const page of this._bidiPages.values()) {
+      if (page._page.frameManager.frame(frameId))
+        return page;
+    }
+  }
 }
 
 export class BidiBrowserContext extends BrowserContext {
   declare readonly _browser: BidiBrowser;
   private _originToPermissions = new Map<string, string[]>();
   private _initScriptIds = new Map<InitScript, string>();
+  private _interceptId: bidi.Network.Intercept | undefined;
 
   constructor(browser: BidiBrowser, browserContextId: string | undefined, options: types.BrowserContextOptions) {
     super(browser, options, browserContextId);
@@ -196,6 +226,13 @@ export class BidiBrowserContext extends BrowserContext {
     const promises: Promise<any>[] = [
       super._initialize(),
     ];
+    const downloadBehavior: bidi.Browser.DownloadBehavior = this._options.acceptDownloads === 'accept' ?
+      { type: 'allowed', destinationFolder: this._browser.options.downloadsPath } :
+      { type: 'denied' };
+    promises.push(this._browser._browserSession.send('browser.setDownloadBehavior', {
+      downloadBehavior,
+      userContexts: [this._userContextId()],
+    }));
     promises.push(this.doUpdateDefaultViewport());
     if (this._options.geolocation)
       promises.push(this.setGeolocation(this._options.geolocation));
@@ -205,6 +242,24 @@ export class BidiBrowserContext extends BrowserContext {
         userContexts: [this._userContextId()],
       }));
     }
+    if (this._options.timezoneId) {
+      promises.push(this._browser._browserSession.send('emulation.setTimezoneOverride', {
+        timezone: this._options.timezoneId,
+        userContexts: [this._userContextId()],
+      }));
+    }
+    if (this._options.userAgent) {
+      promises.push(this._browser._browserSession.send('emulation.setUserAgentOverride', {
+        userAgent: this._options.userAgent,
+        userContexts: [this._userContextId()],
+      }));
+    }
+    if (this._options.extraHTTPHeaders)
+      promises.push(this.doUpdateExtraHTTPHeaders());
+    if (this._options.permissions)
+      promises.push(this.doGrantPermissions('*', this._options.permissions));
+    if (this._options.offline)
+      promises.push(this.doUpdateOffline());
     await Promise.all(promises);
   }
 
@@ -252,7 +307,7 @@ export class BidiBrowserContext extends BrowserContext {
         expiry: (c.expires === -1 || c.expires === undefined) ? undefined : Math.round(c.expires),
       };
       return this._browser._browserSession.send('storage.setCookie',
-          { cookie, partition: { type: 'storageKey', userContext: this._browserContextId } });
+          { cookie, partition: { type: 'storageKey', userContext: this._browserContextId, sourceOrigin: c.partitionKey } });
     });
     await Promise.all(promises);
   }
@@ -263,17 +318,36 @@ export class BidiBrowserContext extends BrowserContext {
   }
 
   async doGrantPermissions(origin: string, permissions: string[]) {
+    if (origin === 'null')
+      return;
     const currentPermissions = this._originToPermissions.get(origin) || [];
     const toGrant = permissions.filter(permission => !currentPermissions.includes(permission));
     this._originToPermissions.set(origin, [...currentPermissions, ...toGrant]);
-    await Promise.all(toGrant.map(permission => this._setPermission(origin, permission, bidi.Permissions.PermissionState.Granted)));
+    if (origin === '*') {
+      await Promise.all(this._bidiPages().flatMap(page =>
+        page._page.frames().map(frame =>
+          this.doGrantPermissions(new URL(frame._url).origin, permissions)
+        )
+      ));
+    } else {
+      await Promise.all(toGrant.map(permission => this._setPermission(origin, permission, bidi.Permissions.PermissionState.Granted)));
+    }
+  }
+
+  async doGrantGlobalPermissionsForURL(url: string) {
+    const permissions = this._originToPermissions.get('*');
+    if (!permissions)
+      return;
+    await this.doGrantPermissions(new URL(url).origin, permissions);
   }
 
   async doClearPermissions() {
     const currentPermissions = [...this._originToPermissions.entries()];
     this._originToPermissions = new Map();
-    await Promise.all(currentPermissions.map(([origin, permissions]) => permissions.map(
-        p => this._setPermission(origin, p, bidi.Permissions.PermissionState.Prompt))));
+    await Promise.all(currentPermissions.flatMap(([origin, permissions]) => {
+      if (origin !== '*')
+        return permissions.map(p => this._setPermission(origin, p, bidi.Permissions.PermissionState.Prompt));
+    }));
   }
 
   private async _setPermission(origin: string, permission: string, state: bidi.Permissions.PermissionState) {
@@ -303,12 +377,26 @@ export class BidiBrowserContext extends BrowserContext {
   }
 
   async doUpdateExtraHTTPHeaders(): Promise<void> {
+    const allHeaders = this._options.extraHTTPHeaders || [];
+    await this._browser._browserSession.send('network.setExtraHeaders', {
+      headers: allHeaders.map(({ name, value }) => ({ name, value: { type: 'string' as 'string', value } })),
+      userContexts: [this._userContextId()],
+    });
   }
 
   async setUserAgent(userAgent: string | undefined): Promise<void> {
+    this._options.userAgent = userAgent;
+    await this._browser._browserSession.send('emulation.setUserAgentOverride', {
+      userAgent: userAgent ?? null,
+      userContexts: [this._userContextId()],
+    });
   }
 
   async doUpdateOffline(): Promise<void> {
+    await this._browser._browserSession.send('emulation.setNetworkConditions', {
+      networkConditions: this._options.offline ? { type: 'offline' } : null,
+      userContexts: [this._userContextId()],
+    });
   }
 
   async doSetHTTPCredentials(httpCredentials?: types.Credentials): Promise<void> {
@@ -338,19 +426,47 @@ export class BidiBrowserContext extends BrowserContext {
   }
 
   async doUpdateRequestInterception(): Promise<void> {
+    let interceptPromise = Promise.resolve<any>(undefined);
+    if (this.requestInterceptors.length > 0 && !this._interceptId) {
+      interceptPromise = this._browser._browserSession.send('network.addIntercept', {
+        phases: [bidi.Network.InterceptPhase.BeforeRequestSent],
+      }).then(({ intercept }) => this._interceptId = intercept);
+    }
+    if (this.requestInterceptors.length === 0 && this._interceptId) {
+      const intercept = this._interceptId;
+      this._interceptId = undefined;
+      interceptPromise = this._browser._browserSession.send('network.removeIntercept', { intercept });
+    }
+    await Promise.all([this._browser.updateCacheBehavior(), interceptPromise]);
   }
 
   override async doUpdateDefaultViewport() {
-    if (!this._options.viewport)
+    if (!this._options.viewport && !this._options.screen)
       return;
-    await this._browser._browserSession.send('browsingContext.setViewport', {
-      viewport: {
-        width: this._options.viewport.width,
-        height: this._options.viewport.height
-      },
-      devicePixelRatio: this._options.deviceScaleFactor || 1,
-      userContexts: [this._userContextId()],
-    });
+
+    const screenSize = (this._options.screen || this._options.viewport)!;
+    const viewportSize = (this._options.viewport || this._options.screen)!;
+    await Promise.all([
+      this._browser._browserSession.send('browsingContext.setViewport', {
+        viewport: {
+          width: viewportSize.width,
+          height: viewportSize.height
+        },
+        devicePixelRatio: this._options.deviceScaleFactor || 1,
+        userContexts: [this._userContextId()],
+      }),
+      this._browser._browserSession.send('emulation.setScreenOrientationOverride', {
+        screenOrientation: getScreenOrientation(!!this._options.isMobile, screenSize),
+        userContexts: [this._userContextId()],
+      }),
+      this._browser._browserSession.send('emulation.setScreenSettingsOverride', {
+        screenArea: {
+          width: screenSize.width,
+          height: screenSize.height,
+        },
+        userContexts: [this._userContextId()],
+      })
+    ]);
   }
 
   override async doUpdateDefaultEmulatedMedia() {
@@ -372,7 +488,7 @@ export class BidiBrowserContext extends BrowserContext {
       userContexts: [this._userContextId()],
     }));
     promises.push(...this._bidiPages().map(page => {
-      const realms = [...page._realmToContext].filter(([realm, context]) => context.world === 'main').map(([realm, context]) => realm);
+      const realms = [...page._contextIdToContext].filter(([realm, context]) => context.world === 'main').map(([realm, context]) => realm);
       return Promise.all(realms.map(realm => {
         return page._session.send('script.callFunction', {
           functionDeclaration,
@@ -400,6 +516,7 @@ export class BidiBrowserContext extends BrowserContext {
     await this._browser._browserSession.send('browser.removeUserContext', {
       userContext: this._browserContextId
     });
+    await Promise.all(this._bidiPages().map(bidiPage => bidiPage._page.closedPromise));
     this._browser._contexts.delete(this._browserContextId);
   }
 
@@ -420,6 +537,7 @@ function fromBidiSameSite(sameSite: bidi.Network.SameSite): channels.NetworkCook
     case 'strict': return 'Strict';
     case 'lax': return 'Lax';
     case 'none': return 'None';
+    case 'default': return 'Lax';
   }
   return 'None';
 }
@@ -465,6 +583,19 @@ function getProxyConfiguration(proxySettings?: types.ProxySettings): bidi.Sessio
   // TODO: support authentication.
 
   return proxy;
+}
+
+export function getScreenOrientation(isMobile: boolean, viewportSize: types.Size) {
+  const screenOrientation: bidi.Emulation.ScreenOrientation = {
+    type: 'landscape-primary',
+    natural: bidi.Emulation.ScreenOrientationNatural.Landscape
+  };
+  if (isMobile) {
+    screenOrientation.natural = bidi.Emulation.ScreenOrientationNatural.Portrait;
+    if (viewportSize.width <= viewportSize.height)
+      screenOrientation.type = 'portrait-primary';
+  }
+  return screenOrientation;
 }
 
 export namespace Network {

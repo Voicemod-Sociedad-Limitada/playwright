@@ -344,13 +344,15 @@ it('should send referer', async ({ page, server }) => {
   expect(request.headers['referer']).toBe('http://google.com/');
 });
 
-it('should fail navigation when aborting main resource', async ({ page, server, browserName, isMac, macVersion }) => {
+it('should fail navigation when aborting main resource', async ({ page, server, browserName, isMac, macVersion, isBidi }) => {
   await page.route('**/*', route => route.abort());
   let error = null;
   await page.goto(server.EMPTY_PAGE).catch(e => error = e);
   expect(error).toBeTruthy();
   if (browserName === 'webkit')
     expect(error.message).toContain(isMac && macVersion < 11 ? 'Request intercepted' : 'Blocked by Web Inspector');
+  else if (browserName === 'firefox' && isBidi)
+    expect(error.message).toContain('NS_ERROR_ABORT');
   else if (browserName === 'firefox')
     expect(error.message).toContain('NS_ERROR_FAILURE');
   else
@@ -513,17 +515,14 @@ it('should work with badly encoded server', async ({ page, server }) => {
 it('should work with encoded server - 2', async ({ page, server, browserName }) => {
   // The requestWillBeSent will report URL as-is, whereas interception will
   // report encoded URL for stylesheet. @see crbug.com/759388
+  await page.goto(server.EMPTY_PAGE);
   const requests = [];
   await page.route('**/*', route => {
     void route.continue();
     requests.push(route.request());
   });
-  const response = await page.goto(`data:text/html,<link rel="stylesheet" href="${server.PREFIX}/fonts?helvetica|arial"/>`);
-  expect(response).toBe(null);
-  if (browserName === 'firefox')
-    expect(requests.length).toBe(2); // Firefox DevTools report to navigations in this case as well.
-  else
-    expect(requests.length).toBe(1);
+  await page.setContent(`<link rel="stylesheet" href="${server.PREFIX}/fonts?helvetica|arial"/>`);
+  expect(requests.length).toBe(1);
   expect((await requests[0].response()).status()).toBe(404);
 });
 
@@ -610,7 +609,7 @@ it('should not fulfill with redirect status', async ({ page, server, browserName
   }
 });
 
-it('should support cors with GET', async ({ page, server, browserName }) => {
+it('should support cors with GET', async ({ page, server, browserName, channel }) => {
   await page.goto(server.EMPTY_PAGE);
   await page.route('**/cars*', async (route, request) => {
     const headers = { 'access-control-allow-origin': request.url().endsWith('allow') ? '*' : 'none' };
@@ -778,7 +777,7 @@ it('should not auto-intercept non-preflight OPTIONS without network interception
 });
 
 // Make sure this runs in a new context as preflight results could be cached.
-it('should not auto-intercept non-preflight OPTIONS with network interception', async ({ page, server, isAndroid, browserName }) => {
+it('should not auto-intercept non-preflight OPTIONS with network interception', async ({ page, server, isAndroid, browserName, isBidi }) => {
   it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/20469' });
   it.fixme(isAndroid);
 
@@ -816,7 +815,7 @@ it('should not auto-intercept non-preflight OPTIONS with network interception', 
     expect.soft(text1).toBe('Hello');
     expect.soft(text2).toBe('World');
     // Preflight for OPTIONS is auto-fulfilled, then OPTIONS, then GET without preflight.
-    if (browserName === 'chromium')
+    if (browserName === 'chromium' || isBidi)
       expect.soft(requests).toEqual(['OPTIONS:/something', 'GET:/something']);
     else
       expect.soft(requests).toEqual(['OPTIONS:/something', 'OPTIONS:/something', 'GET:/something']);

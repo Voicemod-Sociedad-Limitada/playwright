@@ -22,7 +22,7 @@ import { setCurrentTestInfo, setIsWorkerProcess } from '../common/globals';
 import { stdioChunkToParams } from '../common/ipc';
 import { debugTest, relativeFilePath } from '../util';
 import { FixtureRunner } from './fixtureRunner';
-import { TestSkipError, TestInfoImpl } from './testInfo';
+import { TestSkipError, TestInfoImpl, emtpyTestInfoCallbacks } from './testInfo';
 import { testInfoError } from './util';
 import { inheritFixtureNames } from '../common/fixtures';
 import { PoolBuilder } from '../common/poolBuilder';
@@ -33,24 +33,27 @@ import { loadTestFile } from '../common/testLoader';
 import type { TimeSlot } from './timeoutManager';
 import type { Location } from '../../types/testReporter';
 import type { FullConfigInternal, FullProjectInternal } from '../common/config';
-import type { DonePayload, ResumeAfterStepErrorPayload, RunPayload, TeardownErrorsPayload, TestBeginPayload, TestEndPayload, TestInfoErrorImpl, WorkerInitParams } from '../common/ipc';
+import type * as ipc from '../common/ipc';
 import type { Suite, TestCase } from '../common/test';
 import type { TestAnnotation } from '../../types/test';
 
 export class WorkerMain extends ProcessRunner {
-  private _params: WorkerInitParams;
+  private _params: ipc.WorkerInitParams;
   private _config!: FullConfigInternal;
   private _project!: FullProjectInternal;
   private _poolBuilder!: PoolBuilder;
   private _fixtureRunner: FixtureRunner;
 
   // Accumulated fatal errors that cannot be attributed to a test.
-  private _fatalErrors: TestInfoErrorImpl[] = [];
+  private _fatalErrors: ipc.TestInfoErrorImpl[] = [];
   // Whether we should skip running remaining tests in this suite because
   // of a setup error, usually beforeAll hook.
   private _skipRemainingTestsInSuite: Suite | undefined;
   // The stage of the full cleanup. Once "finished", we can safely stop running anything.
   private _didRunFullCleanup = false;
+  // Whether the worker was stopped due to an unhandled error in a test marked with test.fail().
+  // This should force dispatcher to use a new worker instead.
+  private _stoppedDueToUnhandledErrorInTestFail = false;
   // Whether the worker was requested to stop.
   private _isStopped = false;
   // This promise resolves once the single "run test group" call finishes.
@@ -62,8 +65,9 @@ export class WorkerMain extends ProcessRunner {
   // These suites still need afterAll hooks to be executed for the proper cleanup.
   // Contains dynamic annotations originated by modifiers with a callback, e.g. `test.skip(() => true)`.
   private _activeSuites = new Map<Suite, TestAnnotation[]>();
+  private _resumePromise?: ManualPromise<ipc.ResumePayload>;
 
-  constructor(params: WorkerInitParams) {
+  constructor(params: ipc.WorkerInitParams) {
     super();
     process.env.TEST_WORKER_INDEX = String(params.workerIndex);
     process.env.TEST_PARALLEL_INDEX = String(params.parallelIndex);
@@ -115,7 +119,7 @@ export class WorkerMain extends ProcessRunner {
         return;
       }
       // Ignore top-level errors, they are already inside TestInfo.errors.
-      const fakeTestInfo = new TestInfoImpl(this._config, this._project, this._params, undefined, 0, () => {}, () => {}, () => {}, () => {});
+      const fakeTestInfo = new TestInfoImpl(this._config, this._project, this._params, undefined, 0, emtpyTestInfoCallbacks);
       const runnable = { type: 'teardown' } as const;
       // We have to load the project to get the right deadline below.
       await fakeTestInfo._runWithTimeout(runnable, () => this._loadIfNeeded()).catch(() => {});
@@ -131,12 +135,12 @@ export class WorkerMain extends ProcessRunner {
 
     if (this._fatalErrors.length) {
       this._appendProcessTeardownDiagnostics(this._fatalErrors[this._fatalErrors.length - 1]);
-      const payload: TeardownErrorsPayload = { fatalErrors: this._fatalErrors };
+      const payload: ipc.TeardownErrorsPayload = { fatalErrors: this._fatalErrors };
       this.dispatchEvent('teardownErrors', payload);
     }
   }
 
-  private _appendProcessTeardownDiagnostics(error: TestInfoErrorImpl) {
+  private _appendProcessTeardownDiagnostics(error: ipc.TestInfoErrorImpl) {
     if (!this._lastRunningTests.length)
       return;
     const count = this._totalRunningTests === 1 ? '1 test' : `${this._totalRunningTests} tests`;
@@ -191,8 +195,10 @@ export class WorkerMain extends ProcessRunner {
     // an expect() error which we know does not mess things up.
     const isExpectError = (error instanceof Error) && !!(error as any).matcherResult;
     const shouldContinueInThisWorker = this._currentTest.expectedStatus === 'failed' && isExpectError;
-    if (!shouldContinueInThisWorker)
+    if (!shouldContinueInThisWorker) {
+      this._stoppedDueToUnhandledErrorInTestFail = true;
       void this._stop();
+    }
   }
 
   private async _loadIfNeeded() {
@@ -206,37 +212,45 @@ export class WorkerMain extends ProcessRunner {
     this._config = config;
     this._project = project;
     this._poolBuilder = PoolBuilder.createForWorker(this._project);
+    this._fixtureRunner.workerFixtureTimeout = this._project.project.timeout;
   }
 
-  async runTestGroup(runPayload: RunPayload) {
+  async runTestGroup(runPayload: ipc.RunPayload) {
     this._runFinished = new ManualPromise<void>();
     const entries = new Map(runPayload.entries.map(e => [e.testId, e]));
     let fatalUnknownTestIds: string[] | undefined;
     try {
       await this._loadIfNeeded();
-      const fileSuite = await loadTestFile(runPayload.file, this._config.config.rootDir);
+      const fileSuite = await loadTestFile(runPayload.file, this._config);
       const suite = bindFileSuiteToProject(this._project, fileSuite);
       if (this._params.repeatEachIndex)
         applyRepeatEachIndex(this._project, suite, this._params.repeatEachIndex);
-      const hasEntries = filterTestsRemoveEmptySuites(suite, test => entries.has(test.id));
-      if (hasEntries) {
-        this._poolBuilder.buildPools(suite);
-        this._activeSuites = new Map();
-        this._didRunFullCleanup = false;
-        const tests = suite.allTests();
-        for (let i = 0; i < tests.length; i++) {
-          // Do not run tests after full cleanup, because we are entirely done.
-          if (this._isStopped && this._didRunFullCleanup)
-            break;
-          const entry = entries.get(tests[i].id)!;
-          entries.delete(tests[i].id);
-          debugTest(`test started "${tests[i].title}"`);
-          await this._runTest(tests[i], entry.retry, tests[i + 1]);
-          debugTest(`test finished "${tests[i].title}"`);
-        }
-      } else {
-        fatalUnknownTestIds = runPayload.entries.map(e => e.testId);
+      filterTestsRemoveEmptySuites(suite, test => entries.has(test.id));
+      const tests = suite.allTests();
+
+      // Collect test IDs that were not found in the worker
+      // (e.g. test titles changed between runner and worker).
+      const unknownTestIds = new Set(entries.keys());
+      for (const test of tests)
+        unknownTestIds.delete(test.id);
+      if (unknownTestIds.size) {
+        fatalUnknownTestIds = [...unknownTestIds];
         void this._stop();
+        return;
+      }
+
+      this._poolBuilder.buildPools(suite);
+      this._activeSuites = new Map();
+      this._didRunFullCleanup = false;
+      for (let i = 0; i < tests.length; i++) {
+        // Do not run tests after full cleanup, because we are entirely done.
+        if (this._isStopped && this._didRunFullCleanup)
+          break;
+        const entry = entries.get(tests[i].id)!;
+        entries.delete(tests[i].id);
+        debugTest(`test started "${tests[i].title}"`);
+        await this._runTest(tests[i], entry.retry, tests[i + 1]);
+        debugTest(`test finished "${tests[i].title}"`);
       }
     } catch (e) {
       // In theory, we should run above code without any errors.
@@ -245,10 +259,11 @@ export class WorkerMain extends ProcessRunner {
       this._fatalErrors.push(testInfoError(e));
       void this._stop();
     } finally {
-      const donePayload: DonePayload = {
+      const donePayload: ipc.DonePayload = {
         fatalErrors: this._fatalErrors,
         skipTestsDueToSetupFailure: [],
-        fatalUnknownTestIds
+        fatalUnknownTestIds,
+        stoppedDueToUnhandledErrorInTestFail: this._stoppedDueToUnhandledErrorInTestFail,
       };
       for (const test of this._skipRemainingTestsInSuite?.allTests() || []) {
         if (entries.has(test.id))
@@ -261,17 +276,32 @@ export class WorkerMain extends ProcessRunner {
     }
   }
 
-  resumeAfterStepError(params: ResumeAfterStepErrorPayload): void {
-    this._currentTest?.resumeAfterStepError(params);
+  async customMessage(payload: ipc.CustomMessageRequestPayload): Promise<ipc.CustomMessageResponsePayload> {
+    try {
+      if (this._currentTest?.testId !== payload.testId)
+        throw new Error('Test has already stopped');
+      const response = await this._currentTest._onCustomMessageCallback?.(payload.request);
+      return { response };
+    } catch (error) {
+      return { response: {}, error: testInfoError(error) };
+    }
+  }
+
+  resume(payload: ipc.ResumePayload) {
+    this._resumePromise?.resolve(payload);
   }
 
   private async _runTest(test: TestCase, retry: number, nextTest: TestCase | undefined) {
-    const testInfo = new TestInfoImpl(this._config, this._project, this._params, test, retry,
-        stepBeginPayload => this.dispatchEvent('stepBegin', stepBeginPayload),
-        stepRecoverFromErrorPayload => this.dispatchEvent('stepRecoverFromError', stepRecoverFromErrorPayload),
-        stepEndPayload => this.dispatchEvent('stepEnd', stepEndPayload),
-        attachment => this.dispatchEvent('attach', attachment));
-
+    const testInfo = new TestInfoImpl(this._config, this._project, this._params, test, retry, {
+      onStepBegin: payload => this.dispatchEvent('stepBegin', payload),
+      onStepEnd: payload => this.dispatchEvent('stepEnd', payload),
+      onAttach: payload => this.dispatchEvent('attach', payload),
+      onTestPaused: payload => {
+        this._resumePromise = new ManualPromise();
+        this.dispatchEvent('testPaused', payload);
+        return this._resumePromise;
+      },
+    });
     const processAnnotation = (annotation: TestAnnotation) => {
       testInfo.annotations.push(annotation);
       switch (annotation.type) {
@@ -366,7 +396,10 @@ export class WorkerMain extends ProcessRunner {
         await this._runEachHooksForSuites(suites, 'beforeEach', testInfo);
 
         // Setup fixtures required by the test.
-        testFunctionParams = await this._fixtureRunner.resolveParametersForFunction(test.fn, testInfo, 'test', { type: 'test' });
+        const params = await this._fixtureRunner.resolveParametersForFunction(test.fn, testInfo, 'test', { type: 'test' });
+        if (params !== null)
+          testFunctionParams = params.result;
+
       });
 
       if (testFunctionParams === null) {
@@ -395,7 +428,7 @@ export class WorkerMain extends ProcessRunner {
 
       try {
         // Run "immediately upon test function finish" callback.
-        await testInfo._runWithTimeout({ type: 'test', slot: afterHooksSlot }, async () => testInfo._onDidFinishTestFunction?.());
+        await testInfo._runWithTimeout({ type: 'test', slot: afterHooksSlot }, () => testInfo._didFinishTestFunction());
       } catch (error) {
         firstAfterHooksError = firstAfterHooksError ?? error;
       }
@@ -597,14 +630,14 @@ export class WorkerMain extends ProcessRunner {
   }
 }
 
-function buildTestBeginPayload(testInfo: TestInfoImpl): TestBeginPayload {
+function buildTestBeginPayload(testInfo: TestInfoImpl): ipc.TestBeginPayload {
   return {
     testId: testInfo.testId,
     startWallTime: testInfo._startWallTime,
   };
 }
 
-function buildTestEndPayload(testInfo: TestInfoImpl): TestEndPayload {
+function buildTestEndPayload(testInfo: TestInfoImpl): ipc.TestEndPayload {
   return {
     testId: testInfo.testId,
     duration: testInfo.duration,
@@ -638,4 +671,4 @@ function calculateMaxTimeout(t1: number, t2: number) {
   return (!t1 || !t2) ? 0 : Math.max(t1, t2);
 }
 
-export const create = (params: WorkerInitParams) => new WorkerMain(params);
+export const create = (params: ipc.WorkerInitParams) => new WorkerMain(params);

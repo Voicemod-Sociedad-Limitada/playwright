@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -19,15 +19,15 @@ import { Dispatcher } from './dispatcher';
 import { FrameDispatcher } from './frameDispatcher';
 import { WorkerDispatcher } from './pageDispatcher';
 import { TracingDispatcher } from './tracingDispatcher';
+import { Request } from '../network';
 
 import type { APIRequestContext } from '../fetch';
-import type { Request, Response, Route } from '../network';
+import type { Response, Route } from '../network';
 import type { BrowserContextDispatcher } from './browserContextDispatcher';
 import type { RootDispatcher } from './dispatcher';
 import type { PageDispatcher } from './pageDispatcher';
 import type * as channels from '@protocol/channels';
 import type { Progress } from '@protocol/progress';
-
 
 export class RequestDispatcher extends Dispatcher<Request, channels.RequestChannel, BrowserContextDispatcher | PageDispatcher | FrameDispatcher> implements channels.RequestChannel {
   _type_Request: boolean;
@@ -48,9 +48,9 @@ export class RequestDispatcher extends Dispatcher<Request, channels.RequestChann
     const frame = request.frame();
     const page = request.frame()?._page;
     const pageDispatcher = page ? scope.connection.existingDispatcher<PageDispatcher>(page) : null;
-    const frameDispatcher = frame ? FrameDispatcher.from(scope, frame) : null;
+    const frameDispatcher = FrameDispatcher.fromNullable(scope, frame);
     super(pageDispatcher || frameDispatcher || scope, request, 'Request', {
-      frame: FrameDispatcher.fromNullable(scope, request.frame()),
+      frame: frameDispatcher,
       serviceWorker: WorkerDispatcher.fromNullable(scope, request.serviceWorker()),
       url: request.url(),
       resourceType: request.resourceType(),
@@ -62,6 +62,8 @@ export class RequestDispatcher extends Dispatcher<Request, channels.RequestChann
     });
     this._type_Request = true;
     this._browserContextDispatcher = scope;
+    // Push existing response to the client if it exists.
+    ResponseDispatcher.fromNullable(scope, request._existingResponse());
   }
 
   async rawRequestHeaders(params: channels.RequestRawRequestHeadersParams, progress: Progress): Promise<channels.RequestRawRequestHeadersResult> {
@@ -77,8 +79,8 @@ export class ResponseDispatcher extends Dispatcher<Response, channels.ResponseCh
   _type_Response = true;
 
   static from(scope: BrowserContextDispatcher, response: Response): ResponseDispatcher {
-    const result = scope.connection.existingDispatcher<ResponseDispatcher>(response);
     const requestDispatcher = RequestDispatcher.from(scope, response.request());
+    const result = scope.connection.existingDispatcher<ResponseDispatcher>(response);
     return result || new ResponseDispatcher(requestDispatcher, response);
   }
 
@@ -113,6 +115,10 @@ export class ResponseDispatcher extends Dispatcher<Response, channels.ResponseCh
 
   async rawResponseHeaders(params: channels.ResponseRawResponseHeadersParams, progress: Progress): Promise<channels.ResponseRawResponseHeadersResult> {
     return { headers: await progress.race(this._object.rawResponseHeaders()) };
+  }
+
+  async httpVersion(params: channels.ResponseHttpVersionParams, progress: Progress): Promise<channels.ResponseHttpVersionResult> {
+    return { value: await progress.race(this._object.httpVersion()) };
   }
 
   async sizes(params: channels.ResponseSizesParams, progress: Progress): Promise<channels.ResponseSizesResult> {

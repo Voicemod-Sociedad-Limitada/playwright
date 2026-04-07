@@ -144,8 +144,7 @@ export class FFNetworkManager {
       this._requests.delete(request._id);
       response._requestFinished(responseEndTime);
     }
-    if (event.protocolVersion)
-      response._setHttpVersion(event.protocolVersion);
+    response._setHttpVersion(event.protocolVersion ?? null);
     this._page.frameManager.reportRequestFinished(request.request, response);
   }
 
@@ -159,13 +158,14 @@ export class FFNetworkManager {
       response.setTransferSize(null);
       response.setEncodedBodySize(null);
       response._requestFinished(-1);
+      response._setHttpVersion(null);
     }
     request.request._setFailureText(event.errorCode);
     this._page.frameManager.requestFailed(request.request, event.errorCode === 'NS_BINDING_ABORTED');
   }
 }
 
-const causeToResourceType: {[key: string]: string} = {
+const causeToResourceType: {[key: string]: network.ResourceType} = {
   TYPE_INVALID: 'other',
   TYPE_OTHER: 'other',
   TYPE_SCRIPT: 'script',
@@ -183,15 +183,15 @@ const causeToResourceType: {[key: string]: string} = {
   TYPE_FONT: 'font',
   TYPE_MEDIA: 'media',
   TYPE_WEBSOCKET: 'websocket',
-  TYPE_CSP_REPORT: 'other',
+  TYPE_CSP_REPORT: 'cspreport',
   TYPE_XSLT: 'other',
-  TYPE_BEACON: 'other',
+  TYPE_BEACON: 'beacon',
   TYPE_FETCH: 'fetch',
   TYPE_IMAGESET: 'image',
   TYPE_WEB_MANIFEST: 'manifest',
 };
 
-const internalCauseToResourceType: {[key: string]: string} = {
+const internalCauseToResourceType: {[key: string]: network.ResourceType} = {
   TYPE_INTERNAL_EVENTSOURCE: 'eventsource',
 };
 

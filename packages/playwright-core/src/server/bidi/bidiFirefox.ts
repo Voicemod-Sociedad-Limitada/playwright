@@ -20,14 +20,12 @@ import path from 'path';
 import { wrapInASCIIBox } from '../utils/ascii';
 import { BrowserType, kNoXServerRunningError } from '../browserType';
 import { BidiBrowser } from './bidiBrowser';
-import { kBrowserCloseMessageId } from './bidiConnection';
+import { kBrowserCloseMessageId, kShutdownSessionNewMessageId } from './bidiConnection';
 import { createProfile } from './third_party/firefoxPrefs';
 import { ManualPromise } from '../../utils/isomorphic/manualPromise';
 
 import type { BrowserOptions } from '../browser';
 import type { SdkObject } from '../instrumentation';
-import type { Env } from '../utils/processLauncher';
-import type { ProtocolError } from '../protocolError';
 import type { ConnectionTransport } from '../transport';
 import type * as types from '../types';
 import type { RecentLogsCollector } from '../utils/debugLogger';
@@ -35,7 +33,7 @@ import type { RecentLogsCollector } from '../utils/debugLogger';
 
 export class BidiFirefox extends BrowserType {
   constructor(parent: SdkObject) {
-    super(parent, '_bidiFirefox');
+    super(parent, 'firefox');
   }
 
   override executablePath(): string {
@@ -46,18 +44,15 @@ export class BidiFirefox extends BrowserType {
     return BidiBrowser.connect(this.attribution.playwright, transport, options);
   }
 
-  override doRewriteStartupLog(error: ProtocolError): ProtocolError {
-    if (!error.logs)
-      return error;
-    // https://github.com/microsoft/playwright/issues/6500
-    if (error.logs.includes(`as root in a regular user's session is not supported.`))
-      error.logs = '\n' + wrapInASCIIBox(`Firefox is unable to launch if the $HOME folder isn't owned by the current user.\nWorkaround: Set the HOME=/root environment variable${process.env.GITHUB_ACTION ? ' in your GitHub Actions workflow file' : ''} when running Playwright.`, 1);
-    if (error.logs.includes('no DISPLAY environment variable specified'))
-      error.logs = '\n' + wrapInASCIIBox(kNoXServerRunningError, 1);
-    return error;
+  override doRewriteStartupLog(logs: string): string {
+    if (logs.includes(`as root in a regular user's session is not supported.`))
+      logs = '\n' + wrapInASCIIBox(`Firefox is unable to launch if the $HOME folder isn't owned by the current user.\nWorkaround: Set the HOME=/root environment variable${process.env.GITHUB_ACTION ? ' in your GitHub Actions workflow file' : ''} when running Playwright.`, 1);
+    if (logs.includes('no DISPLAY environment variable specified'))
+      logs = '\n' + wrapInASCIIBox(kNoXServerRunningError, 1);
+    return logs;
   }
 
-  override amendEnvironment(env: Env): Env {
+  override amendEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (!path.isAbsolute(os.homedir()))
       throw new Error(`Cannot launch Firefox with relative home directory. Did you set ${os.platform() === 'win32' ? 'USERPROFILE' : 'HOME'} to a relative path?`);
 
@@ -77,8 +72,23 @@ export class BidiFirefox extends BrowserType {
     return env;
   }
 
-  override attemptToGracefullyCloseBrowser(transport: ConnectionTransport): void {
+  override attemptToGracefullyCloseBrowser(transport: ConnectionTransport) {
+    this._attemptToGracefullyCloseBrowser(transport).catch(() => {});
+  }
+
+  private async _attemptToGracefullyCloseBrowser(transport: ConnectionTransport): Promise<void> {
     // Note that it's fine to reuse the transport, since our connection ignores kBrowserCloseMessageId.
+    if (!transport.onmessage) {
+      // browser.close does not work without an active session. If there is no connection
+      // created with the transport, make sure to create a new session first.
+      transport.send({ method: 'session.new', params: { capabilities: {} }, id: kShutdownSessionNewMessageId });
+      await new Promise(resolve => {
+        transport.onmessage = message => {
+          if (message.id === kShutdownSessionNewMessageId)
+            resolve(true);
+        };
+      });
+    }
     transport.send({ method: 'browser.close', params: {}, id: kBrowserCloseMessageId });
   }
 
@@ -93,11 +103,13 @@ export class BidiFirefox extends BrowserType {
     });
   }
 
-  override defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string): string[] {
+  override async defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string) {
     const { args = [], headless } = options;
     const userDataDirArg = args.find(arg => arg.startsWith('-profile') || arg.startsWith('--profile'));
     if (userDataDirArg)
       throw this._createUserDataDirArgMisuseError('--profile');
+    if (args.find(arg => !arg.startsWith('-')))
+      throw new Error('Arguments can not specify page to be opened');
     const firefoxArguments = ['--remote-debugging-port=0'];
     if (headless)
       firefoxArguments.push('--headless');

@@ -18,13 +18,13 @@ import { EventEmitter } from 'events';
 
 import { eventsHelper } from '../utils/eventsHelper';
 import { ValidationError, createMetadataValidator, findValidator  } from '../../protocol/validator';
-import { assert, monotonicTime, rewriteErrorMessage, debugLogger } from '../../utils';
+import { assert, monotonicTime, rewriteErrorMessage } from '../../utils';
 import { isUnderTest } from '../utils/debug';
 import { TargetClosedError, isTargetClosedError, serializeError } from '../errors';
 import { createRootSdkObject, SdkObject } from '../instrumentation';
 import { isProtocolError } from '../protocolError';
 import { compressCallLog } from '../callLog';
-import { methodMetainfo } from '../../utils/isomorphic/protocolMetainfo';
+import { getMetainfo } from '../../utils/isomorphic/protocolMetainfo';
 import { Progress, ProgressController } from '../progress';
 
 import type { CallMetadata } from '../instrumentation';
@@ -101,11 +101,7 @@ export class Dispatcher<Type extends SdkObject, ChannelType, ParentScopeType ext
   }
 
   async _runCommand(callMetadata: CallMetadata, method: string, validParams: any) {
-    const controller = new ProgressController(callMetadata, message => {
-      const logName = this._object.logName || 'api';
-      debugLogger.log(logName, message);
-      this._object.instrumentation.onCallLog(this._object, callMetadata, logName, message);
-    });
+    const controller = ProgressController.createForSdkObject(this._object, callMetadata);
     this._activeProgressControllers.add(controller);
     try {
       return await controller.run(progress => (this as any)[method](validParams, progress), validParams?.timeout);
@@ -125,7 +121,7 @@ export class Dispatcher<Type extends SdkObject, ChannelType, ParentScopeType ext
   }
 
   _dispose(reason?: 'gc') {
-    this._disposeRecursively(new TargetClosedError());
+    this._disposeRecursively(new TargetClosedError(this._object.closeReason()));
     this.connection.sendDispose(this, reason);
   }
 
@@ -304,7 +300,7 @@ export class DispatcherConnection {
     const { id, guid, method, params, metadata } = message as any;
     const dispatcher = this._dispatcherByGuid.get(guid);
     if (!dispatcher) {
-      this.onmessage({ id, error: serializeError(new TargetClosedError()) });
+      this.onmessage({ id, error: serializeError(new TargetClosedError(undefined)) });
       return;
     }
 
@@ -322,7 +318,7 @@ export class DispatcherConnection {
       return;
     }
 
-    const metainfo = methodMetainfo.get(dispatcher._type + '.' + method);
+    const metainfo = getMetainfo({ type: dispatcher._type, method });
     if (metainfo?.internal) {
       // For non-js ports, it is easier to detect internal calls here rather
       // than generate protocol metainfo for each language.
@@ -379,19 +375,19 @@ export class DispatcherConnection {
     try {
       // If the dispatcher has been disposed while running the instrumentation call, error out.
       if (this._dispatcherByGuid.get(guid) !== dispatcher)
-        throw new TargetClosedError(closeReason(sdkObject));
+        throw new TargetClosedError(sdkObject.closeReason());
       const result = await dispatcher._runCommand(callMetadata, method, validParams);
       const validator = findValidator(dispatcher._type, method, 'Result');
       response.result = validator(result, '', this._validatorToWireContext());
       callMetadata.result = result;
     } catch (e) {
       if (isTargetClosedError(e)) {
-        const reason = closeReason(sdkObject);
+        const reason = sdkObject.closeReason();
         if (reason)
           rewriteErrorMessage(e, reason);
       } else if (isProtocolError(e)) {
         if (e.type === 'closed')
-          e = new TargetClosedError(closeReason(sdkObject), e.browserLogMessage());
+          e = new TargetClosedError(sdkObject.closeReason(), e.browserLogMessage());
         else if (e.type === 'crashed')
           rewriteErrorMessage(e, 'Target crashed ' + e.browserLogMessage());
       }
@@ -415,10 +411,4 @@ export class DispatcherConnection {
     if (slowMo)
       await new Promise(f => setTimeout(f, slowMo));
   }
-}
-
-function closeReason(sdkObject: SdkObject): string | undefined {
-  return sdkObject.attribution.page?.closeReason ||
-    sdkObject.attribution.context?._closeReason ||
-    sdkObject.attribution.browser?._closeReason;
 }

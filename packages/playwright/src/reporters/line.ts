@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { TerminalReporter } from './base';
+import { markErrorsAsReported, TerminalReporter } from './base';
 
 import type { FullResult, Suite, TestCase, TestError, TestResult, TestStep } from '../../types/testReporter';
 
@@ -78,6 +78,29 @@ class LineReporter extends TerminalReporter {
       this._updateLine(test, result, step.parent);
   }
 
+  async onTestPaused(test: TestCase, result: TestResult) {
+    // without TTY, user cannot interrupt the pause. let's skip it.
+    if (!process.stdin.isTTY && !process.env.PW_TEST_DEBUG_REPORTERS)
+      return;
+
+    if (!process.env.PW_TEST_DEBUG_REPORTERS)
+      this.screen.stdout.write(`\u001B[1A\u001B[2K`);
+
+    if (test.outcome() === 'unexpected') {
+      this.writeLine(this.screen.colors.red(this.formatTestHeader(test, { indent: '  ', index: ++this._failures })));
+      this.writeLine(this.formatResultErrors(test, result));
+      markErrorsAsReported(result);
+      this.writeLine(this.screen.colors.yellow(`    Paused on error. Press Ctrl+C to end.`) + '\n\n');
+    } else {
+      this.writeLine(this.screen.colors.yellow(this.formatTestHeader(test, { indent: '  ' })));
+      this.writeLine(this.screen.colors.yellow(`    Paused at test end. Press Ctrl+C to end.`) + '\n\n');
+    }
+
+    this._updateLine(test, result, undefined);
+
+    await new Promise<void>(() => {});
+  }
+
   override onTestEnd(test: TestCase, result: TestResult) {
     super.onTestEnd(test, result);
     if (!this.willRetry(test) && (test.outcome() === 'flaky' || test.outcome() === 'unexpected' || result.status === 'interrupted')) {
@@ -89,7 +112,7 @@ class LineReporter extends TerminalReporter {
   }
 
   private _updateLine(test: TestCase, result: TestResult, step?: TestStep) {
-    const retriesPrefix = this.totalTestCount < this._current ? ` (retries)` : ``;
+    const retriesPrefix = result.retry ? ` (retries)` : ``;
     const prefix = `[${this._current}/${this.totalTestCount}]${retriesPrefix} `;
     const currentRetrySuffix = result.retry ? this.screen.colors.yellow(` (retry #${result.retry})`) : '';
     const title = this.formatTestTitle(test, step) + currentRetrySuffix;

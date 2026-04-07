@@ -18,10 +18,10 @@
 // No dependencies as it is used from the Electron loader.
 
 const disabledFeatures = (assistantMode?: boolean) => [
-  // See https://github.com/microsoft/playwright/pull/10380
-  'AcceptCHFrame',
   // See https://github.com/microsoft/playwright/issues/14047
   'AvoidUnnecessaryBeforeUnloadCheckSync',
+  // See https://github.com/microsoft/playwright/issues/38568
+  'BoundaryEventDispatchTracksNodeRemoval',
   'DestroyProfileOnBrowserClose',
   // See https://github.com/microsoft/playwright/pull/13854
   'DialMediaRouteProvider',
@@ -40,10 +40,14 @@ const disabledFeatures = (assistantMode?: boolean) => [
   'Translate',
   // See https://issues.chromium.org/u/1/issues/435410220
   'AutoDeElevate',
+  // See https://github.com/microsoft/playwright/issues/37714
+  'RenderDocument',
+  // Prevents downloading optimization hints on startup.
+  'OptimizationHints',
   assistantMode ? 'AutomationControlled' : '',
 ].filter(Boolean);
 
-export const chromiumSwitches = (assistantMode?: boolean, channel?: string) => [
+export const chromiumSwitches = (assistantMode?: boolean, channel?: string, android?: boolean) => [
   '--disable-field-trial-config', // https://source.chromium.org/chromium/chromium/src/+/main:testing/variations/README.md
   '--disable-background-networking',
   '--disable-background-timer-throttling',
@@ -58,7 +62,7 @@ export const chromiumSwitches = (assistantMode?: boolean, channel?: string) => [
   '--disable-dev-shm-usage',
   '--disable-extensions',
   '--disable-features=' + disabledFeatures(assistantMode).join(','),
-  channel === 'chromium-tip-of-tree' ? '--enable-features=CDPScreenshotNewSurface' : '',
+  process.env.PLAYWRIGHT_LEGACY_SCREENSHOT ? '' : '--enable-features=CDPScreenshotNewSurface',
   '--allow-pre-commit-input',
   '--disable-hang-monitor',
   '--disable-ipc-flooding-protection',
@@ -80,4 +84,11 @@ export const chromiumSwitches = (assistantMode?: boolean, channel?: string) => [
   // Edge can potentially restart on Windows (msRelaunchNoCompatLayer) which looses its file descriptors (stdout/stderr) and CDP (3/4). Disable until fixed upstream.
   '--edge-skip-compat-layer-relaunch',
   assistantMode ? '' : '--enable-automation',
+  // This disables Chrome for Testing infobar that is visible in the persistent context.
+  // The switch is ignored everywhere else, including Chromium/Chrome/Edge.
+  '--disable-infobars',
+  // Less annoying popups.
+  '--disable-search-engine-choice-screen',
+  // Prevents the "three dots" menu crash in IdentityManager::HasPrimaryAccount for ephemeral contexts.
+  android ? '' : '--disable-sync',
 ].filter(Boolean);

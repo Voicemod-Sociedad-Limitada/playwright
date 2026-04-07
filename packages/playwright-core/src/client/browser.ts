@@ -24,7 +24,7 @@ import { mkdirIfNeeded } from './fileUtils';
 
 import type { BrowserType } from './browserType';
 import type { Page } from './page';
-import type { BrowserContextOptions, LaunchOptions, LaunchServerOptions, Logger } from './types';
+import type { BrowserContextOptions, LaunchOptions, Logger } from './types';
 import type * as api from '../../types/types';
 import type * as channels from '@protocol/channels';
 
@@ -34,8 +34,9 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
   private _closedPromise: Promise<void>;
   _shouldCloseConnectionOnClose = false;
   _browserType!: BrowserType;
-  _options: LaunchOptions = {};
+  private _options: LaunchOptions = {};
   readonly _name: string;
+  readonly _browserName: 'chromium' | 'webkit' | 'firefox';
   private _path: string | undefined;
   _closeReason: string | undefined;
 
@@ -46,6 +47,7 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
   constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.BrowserInitializer) {
     super(parent, type, guid, initializer);
     this._name = initializer.name;
+    this._browserName = initializer.browserName;
     this._channel.on('context', ({ context }) => this._didCreateContext(BrowserContext.from(context)));
     this._channel.on('close', () => this._didClose());
     this._closedPromise = new Promise(f => this.once(Events.Browser.Disconnected, f));
@@ -74,11 +76,9 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
     await this._channel.disconnectFromReusedContext({ reason });
   }
 
-  async _innerNewContext(options: BrowserContextOptions = {}, forReuse: boolean): Promise<BrowserContext> {
-    options = this._browserType._playwright.selectors._withSelectorOptions({
-      ...this._browserType._playwright._defaultContextOptions,
-      ...options,
-    });
+  async _innerNewContext(userOptions: BrowserContextOptions = {}, forReuse: boolean): Promise<BrowserContext> {
+    const options = this._browserType._playwright.selectors._withSelectorOptions(userOptions);
+    await this._instrumentation.runBeforeCreateBrowserContext(options);
     const contextOptions = await prepareBrowserContextParams(this._platform, options);
     const response = forReuse ? await this._channel.newContextForReuse(contextOptions) : await this._channel.newContext(contextOptions);
     const context = BrowserContext.from(response.context);
@@ -128,6 +128,15 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
     return this._initializer.version;
   }
 
+  async bind(title: string, options: { workspaceDir?: string, metadata?: Record<string, any>, host?: string, port?: number } = {}): Promise<{ endpoint: string }> {
+    const { endpoint } = await this._channel.startServer({ title, ...options });
+    return { endpoint };
+  }
+
+  async unbind(): Promise<void> {
+    await this._channel.stopServer();
+  }
+
   async newPage(options: BrowserContextOptions = {}): Promise<Page> {
     return await this._wrapApiCall(async () => {
       const context = await this.newContext(options);
@@ -144,17 +153,6 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
 
   async newBrowserCDPSession(): Promise<api.CDPSession> {
     return CDPSession.from((await this._channel.newBrowserCDPSession()).session);
-  }
-
-  async _launchServer(options: LaunchServerOptions = {}) {
-    const serverLauncher = this._browserType._serverLauncher;
-    const browserImpl = this._connection.toImpl?.(this);
-    if (!serverLauncher || !browserImpl)
-      throw new Error('Launching server is not supported');
-    return await serverLauncher.launchServerOnExistingBrowser(browserImpl, {
-      _sharedBrowser: true,
-      ...options,
-    });
   }
 
   async startTracing(page?: Page, options: { path?: string; screenshots?: boolean; categories?: string[]; } = {}) {

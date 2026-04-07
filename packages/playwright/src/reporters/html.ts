@@ -22,18 +22,17 @@ import { HttpServer, MultiMap, assert, calculateSha1, getPackageManagerExecComma
 import { colors } from 'playwright-core/lib/utils';
 import { open } from 'playwright-core/lib/utilsBundle';
 import { mime } from 'playwright-core/lib/utilsBundle';
-import { yazl } from 'playwright-core/lib/zipBundle';
 
 import { CommonReporterOptions, formatError, formatResultFailure, internalScreen } from './base';
 import { codeFrameColumns } from '../transform/babelBundle';
 import { resolveReporterOutputPath, stripAnsiEscapes } from '../util';
 
-import type { ReporterV2 } from './reporterV2';
+import type { ReportConfigureParams, ReportEndParams, ReporterV2 } from './reporterV2';
 import type { HtmlReporterOptions as HtmlReporterConfigOptions, Metadata, TestAnnotation } from '../../types/test';
 import type * as api from '../../types/testReporter';
-import type { HTMLReport, Location, Stats, TestAttachment, TestCase, TestCaseSummary, TestFile, TestFileSummary, TestResult, TestStep } from '@html-reporter/types';
-import type { ZipFile } from 'playwright-core/lib/zipBundle';
+import type { HTMLReport, HTMLReportOptions, Location, Stats, TestAttachment, TestCase, TestCaseSummary, TestFile, TestFileSummary, TestResult, TestStep } from '@html-reporter/types';
 import type { TransformCallback } from 'stream';
+import type { ZipFile } from 'playwright-core/lib/zipBundle';
 
 type TestEntry = {
   testCase: TestCase;
@@ -47,6 +46,12 @@ const isHtmlReportOption = (type: string): type is HtmlReportOpenOption => {
   return htmlReportOptions.includes(type as HtmlReportOpenOption);
 };
 
+type MachineData = {
+  config: api.FullConfig;
+  result: api.FullResult;
+  reportPath: string;
+};
+
 class HtmlReporter implements ReporterV2 {
   private config!: api.FullConfig;
   private suite!: api.Suite;
@@ -58,6 +63,8 @@ class HtmlReporter implements ReporterV2 {
   private _host: string | undefined;
   private _buildResult: { ok: boolean, singleTestId: string | undefined } | undefined;
   private _topLevelErrors: api.TestError[] = [];
+  private _reportConfigs = new Map<string, api.FullConfig>();
+  private _machines: MachineData[] = [];
 
   constructor(options: HtmlReporterConfigOptions & CommonReporterOptions) {
     this._options = options;
@@ -121,28 +128,41 @@ class HtmlReporter implements ReporterV2 {
     this._topLevelErrors.push(error);
   }
 
+  onReportConfigure(params: ReportConfigureParams): void {
+    this._reportConfigs.set(params.reportPath, params.config);
+  }
+
+  onReportEnd(params: ReportEndParams): void {
+    const config = this._reportConfigs.get(params.reportPath);
+    if (config)
+      this._machines.push({ config, result: params.result, reportPath: params.reportPath });
+  }
+
   async onEnd(result: api.FullResult) {
     const projectSuites = this.suite.suites;
     await removeFolders([this._outputFolder]);
-    let noSnippets: boolean | undefined;
-    if (process.env.PLAYWRIGHT_HTML_NO_SNIPPETS === 'false' || process.env.PLAYWRIGHT_HTML_NO_SNIPPETS === '0')
-      noSnippets = false;
-    else if (process.env.PLAYWRIGHT_HTML_NO_SNIPPETS)
-      noSnippets = true;
-    noSnippets = noSnippets || this._options.noSnippets;
+    const noSnippets = parseBooleanEnvVar('PLAYWRIGHT_HTML_NO_SNIPPETS') ?? this._options.noSnippets;
+    const noCopyPrompt = parseBooleanEnvVar('PLAYWRIGHT_HTML_NO_COPY_PROMPT') ?? this._options.noCopyPrompt;
+    const doNotInlineAssets = parseBooleanEnvVar('PLAYWRIGHT_HTML_DO_NOT_INLINE_ASSETS') ?? this._options.doNotInlineAssets ?? false;
 
-    const builder = new HtmlBuilder(this.config, this._outputFolder, this._attachmentsBaseURL, process.env.PLAYWRIGHT_HTML_TITLE || this._options.title, noSnippets);
-    this._buildResult = await builder.build(this.config.metadata, projectSuites, result, this._topLevelErrors);
+    const { yazl } = await import('playwright-core/lib/zipBundle');
+    const builder = new HtmlBuilder(yazl, this.config, this._outputFolder, this._attachmentsBaseURL, doNotInlineAssets, {
+      title: process.env.PLAYWRIGHT_HTML_TITLE || this._options.title,
+      noSnippets,
+      noCopyPrompt,
+    });
+    this._buildResult = await builder.build(this.config.metadata, projectSuites, result, this._topLevelErrors, this._machines);
   }
 
   async onExit() {
     if (process.env.CI || !this._buildResult)
       return;
     const { ok, singleTestId } = this._buildResult;
-    const shouldOpen = !this._options._isTestServer && (this._open === 'always' || (!ok && this._open === 'on-failure'));
+    const isCodingAgent = !!process.env.CLAUDECODE || !!process.env.COPILOT_CLI;
+    const shouldOpen = !isCodingAgent && !!process.stdin.isTTY && (this._open === 'always' || (!ok && this._open === 'on-failure'));
     if (shouldOpen) {
       await showHTMLReport(this._outputFolder, this._host, this._port, singleTestId);
-    } else if (this._options._mode === 'test' && !this._options._isTestServer) {
+    } else if (this._options._mode === 'test' && !!process.stdin.isTTY) {
       const packageManagerCommand = getPackageManagerExecCommand();
       const relativeReportPath = this._outputFolder === standaloneDefaultFolder() ? '' : ' ' + path.relative(process.cwd(), this._outputFolder);
       const hostArg = this._host ? ` --host ${this._host}` : '';
@@ -172,6 +192,15 @@ function getHtmlReportOptionProcessEnv(): HtmlReportOpenOption | undefined {
     return undefined;
   }
   return htmlOpenEnv;
+}
+
+function parseBooleanEnvVar(name: string): boolean | undefined {
+  const value = process.env[name];
+  if (value === 'false' || value === '0')
+    return false;
+  if (value)
+    return true;
+  return undefined;
 }
 
 function standaloneDefaultFolder(): string {
@@ -211,8 +240,6 @@ export function startHtmlReportServer(folder: string): HttpServer {
         return false;
       }
     }
-    if (relativePath.endsWith('/stall.js'))
-      return true;
     if (relativePath === '/')
       relativePath = '/index.html';
     const absolutePath = path.join(folder, ...relativePath.split('/'));
@@ -221,6 +248,8 @@ export function startHtmlReportServer(folder: string): HttpServer {
   return server;
 }
 
+type DataMap = Map<string, { testFile: TestFile, testFileSummary: TestFileSummary }>;
+
 class HtmlBuilder {
   private _config: api.FullConfig;
   private _reportFolder: string;
@@ -228,43 +257,29 @@ class HtmlBuilder {
   private _dataZipFile: ZipFile;
   private _hasTraces = false;
   private _attachmentsBaseURL: string;
-  private _title: string | undefined;
-  private _noSnippets: boolean;
+  private _options: HTMLReportOptions;
+  private _doNotInlineAssets: boolean;
 
-  constructor(config: api.FullConfig, outputDir: string, attachmentsBaseURL: string, title: string | undefined, noSnippets: boolean = false) {
+  constructor(yazl: typeof import('playwright-core/lib/zipBundle').yazl, config: api.FullConfig, outputDir: string, attachmentsBaseURL: string, doNotInlineAssets: boolean, options: HTMLReportOptions) {
+    this._dataZipFile = new yazl.ZipFile();
     this._config = config;
     this._reportFolder = outputDir;
-    this._noSnippets = noSnippets;
+    this._options = options;
+    this._doNotInlineAssets = doNotInlineAssets;
     fs.mkdirSync(this._reportFolder, { recursive: true });
-    this._dataZipFile = new yazl.ZipFile();
     this._attachmentsBaseURL = attachmentsBaseURL;
-    this._title = title;
   }
 
-  async build(metadata: Metadata, projectSuites: api.Suite[], result: api.FullResult, topLevelErrors: api.TestError[]): Promise<{ ok: boolean, singleTestId: string | undefined }> {
-    const data = new Map<string, { testFile: TestFile, testFileSummary: TestFileSummary }>();
+  async build(metadata: Metadata, projectSuites: api.Suite[], result: api.FullResult, topLevelErrors: api.TestError[], machines: MachineData[]): Promise<{ ok: boolean, singleTestId: string | undefined }> {
+    const data: DataMap = new Map();
     for (const projectSuite of projectSuites) {
+      const projectName = projectSuite.project()!.name;
       for (const fileSuite of projectSuite.suites) {
         const fileName = this._relativeLocation(fileSuite.location)!.file;
-        const fileId = calculateSha1(toPosixPath(fileName)).slice(0, 20);
-        let fileEntry = data.get(fileId);
-        if (!fileEntry) {
-          fileEntry = {
-            testFile: { fileId, fileName, tests: [] },
-            testFileSummary: { fileId, fileName, tests: [], stats: emptyStats() },
-          };
-          data.set(fileId, fileEntry);
-        }
-        const { testFile, testFileSummary } = fileEntry;
-        const testEntries: TestEntry[] = [];
-        this._processSuite(fileSuite, projectSuite.project()!.name, [], testEntries);
-        for (const test of testEntries) {
-          testFile.tests.push(test.testCase);
-          testFileSummary.tests.push(test.testCaseSummary);
-        }
+        this._createEntryForSuite(data, projectName, fileSuite, fileName, true);
       }
     }
-    if (!this._noSnippets)
+    if (!this._options.noSnippets)
       createSnippets(this._stepsInFile);
 
     let ok = true;
@@ -296,13 +311,19 @@ class HtmlBuilder {
     }
     const htmlReport: HTMLReport = {
       metadata,
-      title: this._title,
       startTime: result.startTime.getTime(),
       duration: result.duration,
       files: [...data.values()].map(e => e.testFileSummary),
       projectNames: projectSuites.map(r => r.project()!.name),
       stats: { ...[...data.values()].reduce((a, e) => addStats(a, e.testFileSummary.stats), emptyStats()) },
       errors: topLevelErrors.map(error => formatError(internalScreen, error).message),
+      options: this._options,
+      machines: machines.map(machine => ({
+        duration: machine.result.duration,
+        startTime: machine.result.startTime.getTime(),
+        tag: machine.config.tags,
+        shardIndex: machine.config.shard?.current,
+      })),
     };
     htmlReport.files.sort((f1, f2) => {
       const w1 = f1.stats.unexpected * 1000 + f1.stats.flaky;
@@ -318,34 +339,7 @@ class HtmlBuilder {
       singleTestId = testFile.tests[0].testId;
     }
 
-    if (process.env.PW_HMR === '1') {
-      const redirectFile = path.join(this._reportFolder, 'index.html');
-
-      await this._writeReportData(redirectFile);
-
-      async function redirect() {
-        const hmrURL = new URL('http://localhost:44224'); // dev server, port is harcoded in build.js
-        const popup = window.open(hmrURL);
-        const listener = (evt: MessageEvent) => {
-          if (evt.source === popup && evt.data === 'ready') {
-            const element = document.getElementById('playwrightReportBase64');
-            popup!.postMessage(element?.textContent ?? '', hmrURL.origin);
-            window.removeEventListener('message', listener);
-            // This is generally not allowed
-            window.close();
-          }
-        };
-        window.addEventListener('message', listener);
-      }
-
-      fs.appendFileSync(redirectFile, `<script>(${redirect.toString()})()</script>`);
-
-      return { ok, singleTestId };
-    }
-
-    // Copy app.
-    const appFolder = path.join(require.resolve('playwright-core'), '..', 'lib', 'vite', 'htmlReport');
-    await copyFileAndMakeWritable(path.join(appFolder, 'index.html'), path.join(this._reportFolder, 'index.html'));
+    const reportIndexFile = await this._writeStaticAssets();
 
     // Copy trace viewer.
     if (this._hasTraces) {
@@ -365,35 +359,77 @@ class HtmlBuilder {
       }
     }
 
-    await this._writeReportData(path.join(this._reportFolder, 'index.html'));
-
+    await this._writeReportData(reportIndexFile);
 
     return { ok, singleTestId };
   }
 
+  private async _writeStaticAssets() {
+    const appFolder = path.join(require.resolve('playwright-core'), '..', 'lib', 'vite', 'htmlReport');
+    const reportIndexFile = path.join(this._reportFolder, 'index.html');
+    if (this._doNotInlineAssets) {
+      const html = await fs.promises.readFile(path.join(appFolder, 'index.html'), 'utf-8');
+      await Promise.all([
+        fs.promises.writeFile(reportIndexFile, html),
+        fs.promises.copyFile(path.join(appFolder, 'report.js'), path.join(this._reportFolder, 'report.js')),
+        fs.promises.copyFile(path.join(appFolder, 'report.css'), path.join(this._reportFolder, 'report.css')),
+      ]);
+    } else {
+      let html = await fs.promises.readFile(path.join(appFolder, 'index.html'), 'utf-8');
+      const [js, css] = await Promise.all([
+        fs.promises.readFile(path.join(appFolder, 'report.js'), 'utf-8'),
+        fs.promises.readFile(path.join(appFolder, 'report.css'), 'utf-8'),
+      ]);
+      html = html.replace(/<script type="module"[^>]*><\/script>/, () => `<script type="module">${js}</script>`);
+      html = html.replace(/<link rel="stylesheet"[^>]*>/, () => `<style type='text/css'>${css}</style>`);
+      await fs.promises.writeFile(reportIndexFile, html);
+    }
+    return reportIndexFile;
+  }
+
   private async _writeReportData(filePath: string) {
-    fs.appendFileSync(filePath, '<script id="playwrightReportBase64" type="application/zip">data:application/zip;base64,');
+    fs.appendFileSync(filePath, '<template id="playwrightReportBase64">data:application/zip;base64,');
     await new Promise(f => {
-      this._dataZipFile!.end(undefined, () => {
-        this._dataZipFile!.outputStream
+      this._dataZipFile.end(undefined, () => {
+        this._dataZipFile.outputStream
             .pipe(new Base64Encoder())
             .pipe(fs.createWriteStream(filePath, { flags: 'a' })).on('close', f);
       });
     });
-    fs.appendFileSync(filePath, '</script>');
+    fs.appendFileSync(filePath, '</template>');
   }
 
   private _addDataFile(fileName: string, data: any) {
     this._dataZipFile.addBuffer(Buffer.from(JSON.stringify(data)), fileName);
   }
 
-  private _processSuite(suite: api.Suite, projectName: string, path: string[], outTests: TestEntry[]) {
+  private _createEntryForSuite(data: DataMap, projectName: string, suite: api.Suite, fileName: string, deep: boolean) {
+    const fileId = calculateSha1(fileName).slice(0, 20);
+    let fileEntry = data.get(fileId);
+    if (!fileEntry) {
+      fileEntry = {
+        testFile: { fileId, fileName, tests: [] },
+        testFileSummary: { fileId, fileName, tests: [], stats: emptyStats() },
+      };
+      data.set(fileId, fileEntry);
+    }
+
+    const { testFile, testFileSummary } = fileEntry;
+    const testEntries: TestEntry[] = [];
+    this._processSuite(suite, projectName, [], deep, testEntries);
+    for (const test of testEntries) {
+      testFile.tests.push(test.testCase);
+      testFileSummary.tests.push(test.testCaseSummary);
+    }
+  }
+
+  private _processSuite(suite: api.Suite, projectName: string, path: string[], deep: boolean, outTests: TestEntry[]) {
     const newPath = [...path, suite.title];
     suite.entries().forEach(e => {
       if (e.type === 'test')
         outTests.push(this._createTestEntry(e, projectName, newPath));
-      else
-        this._processSuite(e, projectName, newPath, outTests);
+      else if (deep)
+        this._processSuite(e, projectName, newPath, deep, outTests);
     });
   }
 
@@ -429,7 +465,11 @@ class HtmlBuilder {
         path,
         ok: test.outcome() === 'expected' || test.outcome() === 'flaky',
         results: results.map(result => {
-          return { attachments: result.attachments.map(a => ({ name: a.name, contentType: a.contentType, path: a.path })) };
+          return {
+            attachments: result.attachments.map(a => ({ name: a.name, contentType: a.contentType, path: a.path })),
+            startTime: result.startTime,
+            workerIndex: result.workerIndex,
+          };
         }),
       },
     };
@@ -538,6 +578,7 @@ class HtmlBuilder {
         ...result.attachments,
         ...result.stdout.map(m => stdioAttachment(m, 'stdout')),
         ...result.stderr.map(m => stdioAttachment(m, 'stderr'))]),
+      workerIndex: result.workerIndex,
     };
   }
 

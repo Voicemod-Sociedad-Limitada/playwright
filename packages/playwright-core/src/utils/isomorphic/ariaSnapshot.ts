@@ -24,6 +24,7 @@ export type AriaRole = 'alert' | 'alertdialog' | 'application' | 'article' | 'ba
   'spinbutton' | 'status' | 'strong' | 'subscript' | 'superscript' | 'switch' | 'tab' | 'table' | 'tablist' | 'tabpanel' | 'term' | 'textbox' | 'time' | 'timer' |
   'toolbar' | 'tooltip' | 'tree' | 'treegrid' | 'treeitem';
 
+// Note: please keep in sync with ariaPropsEqual() below.
 export type AriaProps = {
   checked?: boolean | 'mixed';
   disabled?: boolean;
@@ -34,12 +35,53 @@ export type AriaProps = {
   selected?: boolean;
 };
 
+export type AriaBox = {
+  visible: boolean;
+  inline: boolean;
+  cursor?: string;
+};
+
+// Note: please keep in sync with ariaNodesEqual() below.
+export type AriaNode = AriaProps & {
+  role: AriaRole | 'fragment' | 'iframe';
+  name: string;
+  ref?: string;
+  children: (AriaNode | string)[];
+  box: AriaBox;
+  receivesPointerEvents: boolean;
+  props: Record<string, string>;
+};
+
+export function ariaNodesEqual(a: AriaNode, b: AriaNode): boolean {
+  if (a.role !== b.role || a.name !== b.name)
+    return false;
+  if (!ariaPropsEqual(a, b) || hasPointerCursor(a) !== hasPointerCursor(b))
+    return false;
+  const aKeys = Object.keys(a.props);
+  const bKeys = Object.keys(b.props);
+  return aKeys.length === bKeys.length && aKeys.every(k => a.props[k] === b.props[k]);
+}
+
+export function hasPointerCursor(ariaNode: AriaNode): boolean {
+  return ariaNode.box.cursor === 'pointer';
+}
+
+function ariaPropsEqual(a: AriaProps, b: AriaProps): boolean {
+  return a.active === b.active && a.checked === b.checked && a.disabled === b.disabled && a.expanded === b.expanded && a.selected === b.selected && a.level === b.level && a.pressed === b.pressed;
+}
+
 // We pass parsed template between worlds using JSON, make it easy.
 export type AriaRegex = { pattern: string };
 
+// We can't tell apart pattern and text, so we pass both.
+export type AriaTextValue = {
+  raw: string;
+  normalized: string;
+};
+
 export type AriaTemplateTextNode = {
   kind: 'text';
-  text: AriaRegex | string;
+  text: AriaTextValue;
 };
 
 export type AriaTemplateRoleNode = AriaProps & {
@@ -47,7 +89,7 @@ export type AriaTemplateRoleNode = AriaProps & {
   role: AriaRole | 'fragment';
   name?: AriaRegex | string;
   children?: AriaTemplateNode[];
-  props?: Record<string, string | AriaRegex>;
+  props?: Record<string, AriaTextValue>;
   containerMode?: 'contain' | 'equal' | 'deep-equal';
 };
 
@@ -150,7 +192,7 @@ export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: Pars
         }
         container.children.push({
           kind: 'text',
-          text: valueOrRegex(value.value)
+          text: textValue(value.value)
         });
         continue;
       }
@@ -180,7 +222,7 @@ export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: Pars
           continue;
         }
         container.props = container.props ?? {};
-        container.props[key.value.slice(1)] = valueOrRegex(value.value);
+        container.props[key.value.slice(1)] = textValue(value.value);
         continue;
       }
 
@@ -205,7 +247,7 @@ export function parseAriaSnapshot(yaml: YamlLibrary, text: string, options: Pars
           ...childNode,
           children: [{
             kind: 'text',
-            text: valueOrRegex(String(value.value))
+            text: textValue(String(value.value))
           }]
         });
         continue;
@@ -258,19 +300,21 @@ function normalizeWhitespace(text: string) {
   return text.replace(/[\u200b\u00ad]/g, '').replace(/[\r\n\s\t]+/g, ' ').trim();
 }
 
-export function valueOrRegex(value: string): string | AriaRegex {
-  return value.startsWith('/') && value.endsWith('/') && value.length > 1 ? { pattern: value.slice(1, -1) } : normalizeWhitespace(value);
+export function textValue(value: string): AriaTextValue {
+  return {
+    raw: value,
+    normalized: normalizeWhitespace(value),
+  };
 }
 
 export class KeyParser {
   private _input: string;
   private _pos: number;
   private _length: number;
-  private _options: ParsingOptions;
 
   static parse(text: yamlTypes.Scalar<string>, options: ParsingOptions, errors: ParsedYamlError[]): AriaTemplateRoleNode | null {
     try {
-      return new KeyParser(text.value, options)._parse();
+      return new KeyParser(text.value)._parse();
     } catch (e) {
       if (e instanceof ParserError) {
         const message = options.prettyErrors === false ? e.message : e.message + ':\n\n' + text.value + '\n' + ' '.repeat(e.pos) + '^\n';
@@ -284,11 +328,10 @@ export class KeyParser {
     }
   }
 
-  constructor(input: string, options: ParsingOptions) {
+  constructor(input: string) {
     this._input = input;
     this._pos = 0;
     this._length = input.length;
-    this._options = options;
   }
 
   private _peek() {
@@ -484,4 +527,53 @@ export class ParserError extends Error {
     super(message);
     this.pos = pos;
   }
+}
+
+export function findNewNode(from: AriaNode | undefined, to: AriaNode): AriaNode | undefined {
+  type ByRoleAndName = Map<string, Map<string, { node: AriaNode, sizeAndPosition: number }>>;
+
+  function fillMap(root: AriaNode, map: ByRoleAndName, position: number) {
+    let size = 1;
+    let childPosition = position + size;
+    for (const child of root.children || []) {
+      if (typeof child === 'string') {
+        size++;
+        childPosition++;
+      } else {
+        size += fillMap(child, map, childPosition);
+        childPosition += size;
+      }
+    }
+    if (!['none', 'presentation', 'fragment', 'iframe', 'generic'].includes(root.role) && root.name) {
+      let byRole = map.get(root.role);
+      if (!byRole) {
+        byRole = new Map();
+        map.set(root.role, byRole);
+      }
+      const existing = byRole.get(root.name);
+      // This heuristic prioritizes elements at the top of the page, even if somewhat smaller.
+      const sizeAndPosition = size * 100 - position;
+      if (!existing || existing.sizeAndPosition < sizeAndPosition)
+        byRole.set(root.name, { node: root, sizeAndPosition });
+    }
+    return size;
+  }
+
+  const fromMap: ByRoleAndName = new Map();
+  if (from)
+    fillMap(from, fromMap, 0);
+
+  const toMap: ByRoleAndName = new Map();
+  fillMap(to, toMap, 0);
+
+  const result: { node: AriaNode, sizeAndPosition: number }[] = [];
+  for (const [role, byRole] of toMap) {
+    for (const [name, byName] of byRole) {
+      const inFrom = fromMap.get(role)?.get(name);
+      if (!inFrom)
+        result.push(byName);
+    }
+  }
+  result.sort((a, b) => b.sizeAndPosition - a.sizeAndPosition);
+  return result[0]?.node;
 }

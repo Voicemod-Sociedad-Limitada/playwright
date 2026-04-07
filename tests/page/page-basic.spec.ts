@@ -85,6 +85,18 @@ it('page.title should return the page title', async ({ page, server }) => {
   expect(await page.title()).toBe('Woof-Woof');
 });
 
+it('page.title should not throw during navigation', async ({ page, server }) => {
+  await page.setContent('<title>hello</title>');
+  const promise = page.goto(server.PREFIX + '/title.html');
+  const [titleOrError] = await Promise.all([
+    page.title().catch(e => e),
+    promise,
+  ]);
+  expect(typeof titleOrError).toBe('string');
+  expect(titleOrError).toMatch(/^(hello|Loading http.*title.html||Woof-Woof)$/);
+  await expect(page).toHaveTitle('Woof-Woof');
+});
+
 it('page.close should work with window.close', async function({ page }) {
   const newPagePromise = page.waitForEvent('popup');
   await page.evaluate(() => window['newPage'] = window.open('about:blank'));
@@ -94,7 +106,9 @@ it('page.close should work with window.close', async function({ page }) {
   await closedPromise;
 });
 
-it('page.frame should respect name', async function({ page }) {
+it('page.frame should respect name', async function({ page, isBidi }) {
+  it.skip(isBidi, 'page.frame({ name }) is racy with BiDi');
+
   await page.setContent(`<iframe name=target></iframe>`);
   expect(page.frame({ name: 'bogus' })).toBe(null);
   const frame = page.frame({ name: 'target' });

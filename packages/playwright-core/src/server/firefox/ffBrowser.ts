@@ -17,8 +17,7 @@
 
 import { assert } from '../../utils';
 import { Browser } from '../browser';
-import { BrowserContext, verifyGeolocation } from '../browserContext';
-import { TargetClosedError } from '../errors';
+import { BrowserContext, calculateUserAgentEmulation, verifyGeolocation } from '../browserContext';
 import * as network from '../network';
 import { ConnectionEvents, FFConnection  } from './ffConnection';
 import { FFPage } from './ffPage';
@@ -78,7 +77,6 @@ export class FFBrowser extends Browser {
     this.session.on('Browser.detachedFromTarget', this._onDetachedFromTarget.bind(this));
     this.session.on('Browser.downloadCreated', this._onDownloadCreated.bind(this));
     this.session.on('Browser.downloadFinished', this._onDownloadFinished.bind(this));
-    this.session.on('Browser.videoRecordingFinished', this._onVideoRecordingFinished.bind(this));
   }
 
   async _initVersion() {
@@ -143,7 +141,7 @@ export class FFBrowser extends Browser {
     if (!originPage) {
       // Resume the page creation with an error. The page will automatically close right
       // after the download begins.
-      ffPage._markAsError(new Error('Starting new page download'));
+      ffPage._reportAsNew(new Error('Starting new page download'));
       if (ffPage._opener)
         originPage = ffPage._opener._page.initializedOrUndefined();
     }
@@ -157,14 +155,7 @@ export class FFBrowser extends Browser {
     this._downloadFinished(payload.uuid, error);
   }
 
-  _onVideoRecordingFinished(payload: Protocol.Browser.videoRecordingFinishedPayload) {
-    this._takeVideo(payload.screencastId)?.reportFinished();
-  }
-
   _onDisconnect() {
-    for (const video of this._idToVideo.values())
-      video.artifact.reportFinished(new TargetClosedError());
-    this._idToVideo.clear();
     for (const ffPage of this._ffPages.values())
       ffPage.didClose();
     this._ffPages.clear();
@@ -198,8 +189,11 @@ export class FFBrowserContext extends BrowserContext {
     promises.push(this.doUpdateDefaultViewport());
     if (this._options.hasTouch)
       promises.push(this._browser.session.send('Browser.setTouchOverride', { browserContextId, hasTouch: true }));
-    if (this._options.userAgent)
+    if (this._options.userAgent) {
       promises.push(this._browser.session.send('Browser.setUserAgentOverride', { browserContextId, userAgent: this._options.userAgent }));
+      const { navigatorPlatform } = calculateUserAgentEmulation(this._options);
+      promises.push(this._browser.session.send('Browser.setPlatformOverride', { browserContextId, platform: navigatorPlatform || null }));
+    }
     if (this._options.bypassCSP)
       promises.push(this._browser.session.send('Browser.setBypassCSP', { browserContextId, bypassCSP: true }));
     if (this._options.ignoreHTTPSErrors || this._options.internalIgnoreHTTPSErrors)
@@ -219,18 +213,6 @@ export class FFBrowserContext extends BrowserContext {
     if (this._options.offline)
       promises.push(this.doUpdateOffline());
     promises.push(this.doUpdateDefaultEmulatedMedia());
-    if (this._options.recordVideo) {
-      promises.push(this._ensureVideosPath().then(() => {
-        return this._browser.session.send('Browser.setVideoRecordingOptions', {
-          // validateBrowserContextOptions ensures correct video size.
-          options: {
-            ...this._options.recordVideo!.size!,
-            dir: this._options.recordVideo!.dir,
-          },
-          browserContextId: this._browserContextId
-        });
-      }));
-    }
     const proxy = this._options.proxyOverride || this._options.proxy;
     if (proxy) {
       promises.push(this._browser.session.send('Browser.setContextProxy', {
@@ -301,11 +283,12 @@ export class FFBrowserContext extends BrowserContext {
   }
 
   async doGrantPermissions(origin: string, permissions: string[]) {
-    const webPermissionToProtocol = new Map<string, 'geo' | 'desktop-notification' | 'persistent-storage' | 'push'>([
+    const webPermissionToProtocol = new Map<string, string>([
       ['geolocation', 'geo'],
       ['persistent-storage', 'persistent-storage'],
       ['push', 'push'],
       ['notifications', 'desktop-notification'],
+      ['screen-wake-lock', 'screen-wake-lock'],
     ]);
     const filtered = permissions.map(permission => {
       const protocolPermission = webPermissionToProtocol.get(permission);
@@ -335,6 +318,8 @@ export class FFBrowserContext extends BrowserContext {
 
   async setUserAgent(userAgent: string | undefined): Promise<void> {
     await this._browser.session.send('Browser.setUserAgentOverride', { browserContextId: this._browserContextId, userAgent: userAgent || null });
+    const { navigatorPlatform } = calculateUserAgentEmulation({ userAgent });
+    await this._browser.session.send('Browser.setPlatformOverride', { browserContextId: this._browserContextId, platform: navigatorPlatform || null });
   }
 
   async doUpdateOffline(): Promise<void> {
@@ -424,12 +409,6 @@ export class FFBrowserContext extends BrowserContext {
 
   async doClose(reason: string | undefined) {
     if (!this._browserContextId) {
-      if (this._options.recordVideo) {
-        await this._browser.session.send('Browser.setVideoRecordingOptions', {
-          options: undefined,
-          browserContextId: this._browserContextId
-        });
-      }
       // Closing persistent context should close the browser.
       await this._browser.close({ reason });
     } else {

@@ -24,8 +24,6 @@ import { unsafeLocatorOrSelectorAsSelector } from '../utils/isomorphic/locatorPa
 import { generateCode } from './codegen/language';
 import { collapseActions } from './recorder/recorderUtils';
 import { JavaScriptLanguageGenerator } from './codegen/javascript';
-import { Frame } from './frames';
-import { Page } from './page';
 
 import type { Language } from '../utils';
 import type { BrowserContext } from './browserContext';
@@ -44,8 +42,7 @@ export class DebugController extends SdkObject {
     SetModeRequested: 'setModeRequested',
   };
 
-  private _reportState = false;
-  private _disposeListeners = new Set<() => void>();
+  private _trackHierarchyListener: InstrumentationListener | undefined;
   private _playwright: Playwright;
   _sdkLanguage: Language = 'javascript';
   _generateAutoExpect = false;
@@ -64,28 +61,16 @@ export class DebugController extends SdkObject {
   }
 
   setReportStateChanged(enabled: boolean) {
-    if (this._reportState === enabled)
-      return;
-    this._reportState = enabled;
-    if (enabled) {
-      const listener: InstrumentationListener = {
-        onPageOpen: page => {
-          this._emitSnapshot(false);
-          const handleNavigation = () => this._emitSnapshot(false);
-          page.mainFrame().on(Frame.Events.InternalNavigation, handleNavigation);
-          const dispose = () => page.mainFrame().off(Frame.Events.InternalNavigation, handleNavigation);
-          this._disposeListeners.add(dispose);
-          page.on(Page.Events.Close, () => this._disposeListeners.delete(dispose));
-        },
+    if (enabled && !this._trackHierarchyListener) {
+      this._trackHierarchyListener = {
+        onPageOpen: () => this._emitSnapshot(false),
         onPageClose: () => this._emitSnapshot(false),
       };
-      this._playwright.instrumentation.addListener(listener, null);
-      this._disposeListeners.add(() => this._playwright.instrumentation.removeListener(listener));
+      this._playwright.instrumentation.addListener(this._trackHierarchyListener, null);
       this._emitSnapshot(true);
-    } else {
-      for (const dispose of this._disposeListeners)
-        dispose();
-      this._disposeListeners.clear();
+    } else if (!enabled && this._trackHierarchyListener) {
+      this._playwright.instrumentation.removeListener(this._trackHierarchyListener);
+      this._trackHierarchyListener = undefined;
     }
   }
 
@@ -94,10 +79,12 @@ export class DebugController extends SdkObject {
     this._generateAutoExpect = !!params.generateAutoExpect;
 
     if (params.mode === 'none') {
+      const promises = [];
       for (const recorder of await progress.race(this._allRecorders())) {
-        recorder.hideHighlightedSelector();
-        recorder.setMode('none');
+        promises.push(recorder.hideHighlightedSelector());
+        promises.push(recorder.setMode('none'));
       }
+      await Promise.all(promises);
       return;
     }
 
@@ -127,20 +114,24 @@ export class DebugController extends SdkObject {
     if (params.selector)
       unsafeLocatorOrSelectorAsSelector(this._sdkLanguage, params.selector, 'data-testid');
     const ariaTemplate = params.ariaTemplate ? parseAriaSnapshotUnsafe(yaml, params.ariaTemplate) : undefined;
+    const promises = [];
     for (const recorder of await progress.race(this._allRecorders())) {
       if (ariaTemplate)
-        recorder.setHighlightedAriaTemplate(ariaTemplate);
+        promises.push(recorder.setHighlightedAriaTemplate(ariaTemplate));
       else if (params.selector)
-        recorder.setHighlightedSelector(params.selector);
+        promises.push(recorder.setHighlightedSelector(params.selector));
     }
+    await Promise.all(promises);
   }
 
   async hideHighlight(progress: Progress) {
+    const promises = [];
     // Hide all active recorder highlights.
     for (const recorder of await progress.race(this._allRecorders()))
-      recorder.hideHighlightedSelector();
+      promises.push(recorder.hideHighlightedSelector());
     // Hide all locator.highlight highlights.
-    await Promise.all(this._playwright.allPages().map(p => p.hideHighlight().catch(() => {})));
+    promises.push(...this._playwright.allPages().map(p => p.hideHighlight().catch(() => {})));
+    await Promise.all(promises);
   }
 
   async resume(progress: Progress) {
@@ -156,19 +147,7 @@ export class DebugController extends SdkObject {
     const pageCount = this._playwright.allPages().length;
     if (initial && !pageCount)
       return;
-    this.emit(DebugController.Events.StateChanged, {
-      pageCount,
-      browsers: this._playwright.allBrowsers().map(browser => ({
-        id: browser.guid,
-        name: browser.options.name,
-        channel: browser.options.channel,
-        contexts: browser.contexts().map(context => ({
-          pages: context.pages().map(page => ({
-            url: page.mainFrame().url(),
-          }))
-        }))
-      }))
-    });
+    this.emit(DebugController.Events.StateChanged, { pageCount });
   }
 
   private async _allRecorders(): Promise<Recorder[]> {

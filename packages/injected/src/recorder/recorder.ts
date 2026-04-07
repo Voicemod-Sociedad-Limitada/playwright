@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
+// This is the only dependency this file is allowed to have, because we are fine with a dupe.
+// See DEPS.list for more details.
 import clipPaths from './clipPaths';
 
 import type { Point } from '@isomorphic/types';
+import type { AriaSnapshot } from '../ariaSnapshot';
 import type { Highlight, HighlightEntry } from '../highlight';
 import type { InjectedScript } from '../injectedScript';
 import type { ElementText } from '../selectorUtils';
 import type * as actions from '@recorder/actions';
 import type { ElementInfo, Mode, OverlayState, UIState } from '@recorder/recorderTypes';
 import type { Language } from '@isomorphic/locatorGenerators';
-import type { AriaNode, AriaSnapshot } from '@injected/ariaSnapshot';
 
 const HighlightColors = {
   multiple: '#f6b26b7f',
@@ -166,7 +168,7 @@ class InspectTool implements RecorderTool {
 
   private _commit(selector: string, model: HighlightModel) {
     if (this._assertVisibility) {
-      this._recorder.recordAction({
+      void this._recorder.recordAction({
         name: 'assertVisible',
         selector,
         signals: [],
@@ -194,10 +196,12 @@ class RecordActionTool implements RecorderTool {
   private _expectProgrammaticKeyUp = false;
   private _pendingClickAction: { action: actions.ClickAction, timeout: number } | undefined;
   private _observer: MutationObserver | null = null;
+  private _dialog: Dialog;
 
   constructor(recorder: Recorder) {
     this._recorder = recorder;
     this._performingActions = new Set();
+    this._dialog = new Dialog(recorder);
   }
 
   cursor() {
@@ -229,15 +233,22 @@ class RecordActionTool implements RecorderTool {
     this._hoveredElement = null;
     this._activeModel = null;
     this._expectProgrammaticKeyUp = false;
+    this._dialog.close();
   }
 
   onClick(event: MouseEvent) {
+    if (this._dialog.isShowing()) {
+      if (event.button === 2 && event.type === 'auxclick') {
+        // Note: in some browsers, e.g. firefox mac,
+        // auxclick event arrives after contextmenu and should be consumed.
+        consumeEvent(event);
+      }
+      return;
+    }
+
     // in webkit, sliding a range element may trigger a click event with a different target if the mouse is released outside the element bounding box.
     // So we check the hovered element instead, and if it is a range input, we skip click handling
     if (isRangeInput(this._hoveredElement))
-      return;
-    // Right clicks are handled by 'contextmenu' event if its auxclick
-    if (event.button === 2 && event.type === 'auxclick')
       return;
     if (this._shouldIgnoreMouseEvent(event))
       return;
@@ -245,6 +256,11 @@ class RecordActionTool implements RecorderTool {
       return;
     if (this._consumedDueToNoModel(event, this._hoveredModel))
       return;
+
+    if (event.button === 2 && event.type === 'auxclick') {
+      this._showActionListDialog(this._hoveredModel!, event);
+      return;
+    }
 
     const checkbox = asCheckbox(this._recorder.deepEventTarget(event));
     if (checkbox && event.detail === 1) {
@@ -277,6 +293,8 @@ class RecordActionTool implements RecorderTool {
   }
 
   onDblClick(event: MouseEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (isRangeInput(this._hoveredElement))
       return;
     if (this._shouldIgnoreMouseEvent(event))
@@ -313,40 +331,40 @@ class RecordActionTool implements RecorderTool {
   }
 
   onContextMenu(event: MouseEvent) {
-    // the 'contextmenu' event is triggered by a right-click or equivalent action,
-    // and it prevents the click event from firing for that action, so we always
-    // convert 'contextmenu' into a right-click.
+    if (this._dialog.isShowing()) {
+      // Note: in some browsers, e.g. chromium windows,
+      // contextmenu event arrives after auxclick and should be consumed.
+      consumeEvent(event);
+      return;
+    }
     if (this._shouldIgnoreMouseEvent(event))
       return;
     if (this._actionInProgress(event))
       return;
     if (this._consumedDueToNoModel(event, this._hoveredModel))
       return;
-
-    this._performAction({
-      name: 'click',
-      selector: this._hoveredModel!.selector,
-      position: positionForEvent(event),
-      signals: [],
-      button: 'right',
-      modifiers: 0,
-      clickCount: 0
-    });
+    this._showActionListDialog(this._hoveredModel!, event);
   }
 
   onPointerDown(event: PointerEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (this._shouldIgnoreMouseEvent(event))
       return;
     this._consumeWhenAboutToPerform(event);
   }
 
   onPointerUp(event: PointerEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (this._shouldIgnoreMouseEvent(event))
       return;
     this._consumeWhenAboutToPerform(event);
   }
 
   onMouseDown(event: MouseEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (this._shouldIgnoreMouseEvent(event))
       return;
     this._consumeWhenAboutToPerform(event);
@@ -354,12 +372,16 @@ class RecordActionTool implements RecorderTool {
   }
 
   onMouseUp(event: MouseEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (this._shouldIgnoreMouseEvent(event))
       return;
     this._consumeWhenAboutToPerform(event);
   }
 
   onMouseMove(event: MouseEvent) {
+    if (this._dialog.isShowing())
+      return;
     const target = this._recorder.deepEventTarget(event);
     if (this._hoveredElement === target)
       return;
@@ -368,6 +390,8 @@ class RecordActionTool implements RecorderTool {
   }
 
   onMouseLeave(event: MouseEvent) {
+    if (this._dialog.isShowing())
+      return;
     const window = this._recorder.injectedScript.window;
     // Leaving iframe.
     if (window.top !== window && this._recorder.deepEventTarget(event).nodeType === Node.DOCUMENT_NODE) {
@@ -377,10 +401,14 @@ class RecordActionTool implements RecorderTool {
   }
 
   onFocus(event: Event) {
+    if (this._dialog.isShowing())
+      return;
     this._onFocus(true);
   }
 
   onInput(event: Event) {
+    if (this._dialog.isShowing())
+      return;
     const target = this._recorder.deepEventTarget(event);
 
     if (target.nodeName === 'INPUT' && (target as HTMLInputElement).type.toLowerCase() === 'file') {
@@ -433,6 +461,8 @@ class RecordActionTool implements RecorderTool {
   }
 
   onKeyDown(event: KeyboardEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (!this._shouldGenerateKeyPressFor(event))
       return;
     if (this._actionInProgress(event)) {
@@ -464,6 +494,8 @@ class RecordActionTool implements RecorderTool {
   }
 
   onKeyUp(event: KeyboardEvent) {
+    if (this._dialog.isShowing())
+      return;
     if (!this._shouldGenerateKeyPressFor(event))
       return;
 
@@ -476,7 +508,89 @@ class RecordActionTool implements RecorderTool {
   }
 
   onScroll(event: Event) {
+    if (this._dialog.isShowing())
+      return;
     this._resetHoveredModel();
+  }
+
+  private _showActionListDialog(model: HighlightModelWithSelector, event: MouseEvent) {
+    consumeEvent(event);
+    const actionPosition = positionForEvent(event);
+    const actions: { title: string, cb: () => void }[] = [
+      {
+        title: 'Click',
+        cb: () => this._performAction({
+          name: 'click',
+          selector: model.selector,
+          position: actionPosition,
+          signals: [],
+          button: 'left',
+          modifiers: 0,
+          clickCount: 0,
+        }),
+      },
+      {
+        title: 'Right click',
+        cb: () => this._performAction({
+          name: 'click',
+          selector: model.selector,
+          position: actionPosition,
+          signals: [],
+          button: 'right',
+          modifiers: 0,
+          clickCount: 0,
+        }),
+      },
+      {
+        title: 'Double click',
+        cb: () => this._performAction({
+          name: 'click',
+          selector: model.selector,
+          position: actionPosition,
+          signals: [],
+          button: 'left',
+          modifiers: 0,
+          clickCount: 2,
+        }),
+      },
+      {
+        title: 'Hover',
+        cb: () => this._performAction({
+          name: 'hover',
+          selector: model.selector,
+          position: actionPosition,
+          signals: [],
+        }),
+      },
+      {
+        title: 'Pick locator',
+        cb: () => this._recorder.elementPicked(model.selector, model),
+      },
+    ];
+
+    const listElement = this._recorder.document.createElement('x-pw-action-list');
+    listElement.setAttribute('role', 'list');
+    listElement.setAttribute('aria-label', 'Choose action');
+    for (const action of actions) {
+      const actionElement = this._recorder.document.createElement('x-pw-action-item');
+      actionElement.setAttribute('role', 'listitem');
+      actionElement.textContent = action.title;
+      actionElement.setAttribute('aria-label', action.title);
+      actionElement.addEventListener('click', () => {
+        this._dialog.close();
+        action.cb();
+      });
+      listElement.appendChild(actionElement);
+    }
+
+    const dialogElement = this._dialog.show({
+      label: 'Choose action',
+      body: listElement,
+      autosize: true,
+    });
+    const anchorBox = this._recorder.highlight.firstTooltipBox() || model.elements[0].getBoundingClientRect();
+    const dialogPosition = this._recorder.highlight.tooltipPosition(anchorBox, dialogElement);
+    this._dialog.moveTo(dialogPosition.anchorTop, dialogPosition.anchorLeft);
   }
 
   private _resetHoveredModel() {
@@ -516,7 +630,7 @@ class RecordActionTool implements RecorderTool {
     for (const action of this._performingActions) {
       if (isKeyEvent && action.name === 'press' && event.key === action.key)
         return true;
-      if (isMouseOrPointerEvent && (action.name === 'click' || action.name === 'check' || action.name === 'uncheck'))
+      if (isMouseOrPointerEvent && (action.name === 'click' || action.name === 'hover' || action.name === 'check' || action.name === 'uncheck'))
         return true;
     }
 
@@ -544,8 +658,19 @@ class RecordActionTool implements RecorderTool {
       consumeEvent(event);
   }
 
+  private _reportPerformedActionForTests() {
+    if (!this._recorder.injectedScript.isUnderTest)
+      return;
+    // Serialize all to string as we cannot attribute console message to isolated world
+    // in Firefox.
+    console.error('Action performed for test: ' + JSON.stringify({ // eslint-disable-line no-console
+      hovered: this._hoveredModel ? this._hoveredModel.selector : null,
+      active: this._activeModel ? this._activeModel.selector : null,
+    }));
+  }
+
   private _recordAction(action: actions.Action) {
-    this._recorder.recordAction(action);
+    void this._recorder.recordAction(action).then(() => this._reportPerformedActionForTests());
   }
 
   private _performAction(action: actions.PerformOnRecordAction) {
@@ -553,23 +678,11 @@ class RecordActionTool implements RecorderTool {
 
     this._performingActions.add(action);
 
-    const promise = this._recorder.performAction(action).then(() => {
+    void this._recorder.performAction(action).finally(() => {
       this._performingActions.delete(action);
       // If that was a keyboard action, it similarly requires new selectors for active model.
       this._onFocus(false);
-    });
-
-    if (!this._recorder.injectedScript.isUnderTest)
-      return;
-
-    void promise.then(() => {
-      // Serialize all to string as we cannot attribute console message to isolated world
-      // in Firefox.
-      console.error('Action performed for test: ' + JSON.stringify({ // eslint-disable-line no-console
-        hovered: this._hoveredModel ? (this._hoveredModel as any).selector : null,
-        active: this._activeModel ? (this._activeModel as any).selector : null,
-      }));
-    });
+    }).then(() => this._reportPerformedActionForTests());
   }
 
   private _shouldGenerateKeyPressFor(event: KeyboardEvent): boolean {
@@ -658,7 +771,7 @@ class JsonRecordActionTool implements RecorderTool {
     const { ariaSnapshot, selector, ref } = this._ariaSnapshot(element);
     if (checkbox && event.detail === 1) {
       // Interestingly, inputElement.checked is reversed inside this event handler.
-      this._recorder.recordAction({
+      void this._recorder.recordAction({
         name: checkbox.checked ? 'check' : 'uncheck',
         selector,
         ref,
@@ -668,7 +781,7 @@ class JsonRecordActionTool implements RecorderTool {
       return;
     }
 
-    this._recorder.recordAction({
+    void this._recorder.recordAction({
       name: 'click',
       selector,
       ref,
@@ -684,7 +797,7 @@ class JsonRecordActionTool implements RecorderTool {
   onContextMenu(event: MouseEvent): void {
     const element = this._recorder.deepEventTarget(event);
     const { ariaSnapshot, selector, ref } = this._ariaSnapshot(element);
-    this._recorder.recordAction({
+    void this._recorder.recordAction({
       name: 'click',
       selector,
       ref,
@@ -702,7 +815,7 @@ class JsonRecordActionTool implements RecorderTool {
 
     const { ariaSnapshot, selector, ref } = this._ariaSnapshot(element);
     if (isRangeInput(element)) {
-      this._recorder.recordAction({
+      void this._recorder.recordAction({
         name: 'fill',
         selector,
         ref,
@@ -719,7 +832,7 @@ class JsonRecordActionTool implements RecorderTool {
         return;
       }
 
-      this._recorder.recordAction({
+      void this._recorder.recordAction({
         name: 'fill',
         ref,
         selector,
@@ -732,7 +845,7 @@ class JsonRecordActionTool implements RecorderTool {
 
     if (element.nodeName === 'SELECT') {
       const selectElement = element as HTMLSelectElement;
-      this._recorder.recordAction({
+      void this._recorder.recordAction({
         name: 'select',
         selector,
         ref,
@@ -755,7 +868,7 @@ class JsonRecordActionTool implements RecorderTool {
     if (event.key === ' ') {
       const checkbox = asCheckbox(element);
       if (checkbox && event.detail === 0) {
-        this._recorder.recordAction({
+        void this._recorder.recordAction({
           name: checkbox.checked ? 'uncheck' : 'check',
           selector,
           ref,
@@ -766,7 +879,7 @@ class JsonRecordActionTool implements RecorderTool {
       }
     }
 
-    this._recorder.recordAction({
+    void this._recorder.recordAction({
       name: 'press',
       selector,
       ref,
@@ -985,7 +1098,7 @@ class TextAssertionTool implements RecorderTool {
     if (!this._action || !this._dialog.isShowing())
       return;
     this._dialog.close();
-    this._recorder.recordAction(this._action);
+    void this._recorder.recordAction(this._action);
     this._recorder.setMode('recording');
   }
 
@@ -996,7 +1109,7 @@ class TextAssertionTool implements RecorderTool {
     if (this._action?.name === 'assertText') {
       this._showTextDialog(this._action);
     } else if (this._action?.name === 'assertSnapshot') {
-      this._recorder.recordAction(this._action);
+      void this._recorder.recordAction(this._action);
       this._recorder.setMode('recording');
       this._recorder.overlay?.flashToolSucceeded('assertingSnapshot');
     }
@@ -1037,7 +1150,7 @@ class TextAssertionTool implements RecorderTool {
     const action = this._generateAction();
     if (!action)
       return;
-    this._recorder.recordAction(action);
+    void this._recorder.recordAction(action);
     this._recorder.setMode('recording');
     this._recorder.overlay?.flashToolSucceeded('assertingValue');
   }
@@ -1166,7 +1279,9 @@ class Overlay {
   }
 
   setUIState(state: UIState) {
-    this._recordToggle.classList.toggle('toggled', state.mode === 'recording' || state.mode === 'assertingText' || state.mode === 'assertingVisibility' || state.mode === 'assertingValue' || state.mode === 'assertingSnapshot' || state.mode === 'recording-inspecting');
+    const isRecording = state.mode === 'recording' || state.mode === 'assertingText' || state.mode === 'assertingVisibility' || state.mode === 'assertingValue' || state.mode === 'assertingSnapshot' || state.mode === 'recording-inspecting';
+    this._recordToggle.classList.toggle('toggled', isRecording);
+    this._recordToggle.title = isRecording ? 'Stop Recording' : 'Start Recording';
     this._pickLocatorToggle.classList.toggle('toggled', state.mode === 'inspecting' || state.mode === 'recording-inspecting');
     this._assertVisibilityToggle.classList.toggle('toggled', state.mode === 'assertingVisibility');
     this._assertVisibilityToggle.classList.toggle('disabled', state.mode === 'none' || state.mode === 'standby' || state.mode === 'inspecting');
@@ -1273,7 +1388,7 @@ export class Recorder {
   readonly document: Document;
   private _delegate: RecorderDelegate = {};
 
-  constructor(injectedScript: InjectedScript, options?: { recorderMode?: 'default' | 'api' }) {
+  constructor(injectedScript: InjectedScript, options?: { recorderMode?: 'default' | 'api', hideToolbar?: boolean }) {
     this.document = injectedScript.document;
     this.injectedScript = injectedScript;
     this.highlight = injectedScript.createHighlight();
@@ -1290,7 +1405,7 @@ export class Recorder {
     };
     this._currentTool = this._tools.none;
     this._currentTool.install?.();
-    if (injectedScript.window.top === injectedScript.window) {
+    if (injectedScript.window.top === injectedScript.window && !options?.hideToolbar) {
       this.overlay = new Overlay(this);
       this.overlay.setUIState(this.state);
     }
@@ -1430,8 +1545,10 @@ export class Recorder {
   private _onContextMenu(event: MouseEvent) {
     if (!event.isTrusted)
       return;
-    if (this._ignoreOverlayEvent(event))
-      return;
+    // Note: in chromium windows, context menu event always includes overlay,
+    // even for right-click on the page. Therefore, we do not check the overlay
+    // as in any other events. This is fine, because we do not need context menu
+    // to work in our overlay anyway.
     this._currentTool.onContextMenu?.(event);
   }
 
@@ -1588,7 +1705,7 @@ export class Recorder {
     const previousSnapshot = this._lastActionAutoexpectSnapshot;
     this._lastActionAutoexpectSnapshot = this._captureAutoExpectSnapshot();
     if (!isAssertAction(action) && this._lastActionAutoexpectSnapshot) {
-      const element = findNewElement(previousSnapshot, this._lastActionAutoexpectSnapshot);
+      const element = this.injectedScript.utils.findNewElement(previousSnapshot?.root, this._lastActionAutoexpectSnapshot?.root);
       action.preconditionSelector = element ? this.injectedScript.generateSelector(element, { testIdAttributeName: this.state.testIdAttributeName }).selector : undefined;
       if (action.preconditionSelector === action.selector)
         action.preconditionSelector = undefined;
@@ -1596,9 +1713,9 @@ export class Recorder {
     await this._delegate.performAction?.(action).catch(() => {});
   }
 
-  recordAction(action: actions.Action) {
+  async recordAction(action: actions.Action) {
     this._lastActionAutoexpectSnapshot = this._captureAutoExpectSnapshot();
-    void this._delegate.recordAction?.(action);
+    await this._delegate.recordAction?.(action);
   }
 
   setOverlayState(state: { offsetX: number; }) {
@@ -1606,7 +1723,7 @@ export class Recorder {
   }
 
   elementPicked(selector: string, model: HighlightModel) {
-    const ariaSnapshot = this.injectedScript.ariaSnapshot(model.elements[0], { mode: 'expect' });
+    const ariaSnapshot = this.injectedScript.ariaSnapshot(model.elements[0], { mode: 'default' });
     void this._delegate.elementPicked?.({ selector, ariaSnapshot });
   }
 }
@@ -1615,6 +1732,7 @@ class Dialog {
   private _recorder: Recorder;
   private _dialogElement: HTMLElement | null = null;
   private _keyboardListener: ((event: KeyboardEvent) => void) | undefined;
+  private _onGlassPaneClickHandler: ((event: MouseEvent) => void) | undefined;
 
   constructor(recorder: Recorder) {
     this._recorder = recorder;
@@ -1627,14 +1745,15 @@ class Dialog {
   show(options: {
     label: string;
     body: Element;
-    onCommit: () => void;
+    onCommit?: () => void;
     onCancel?: () => void;
+    autosize?: boolean;
   }) {
     const acceptButton = this._recorder.document.createElement('x-pw-tool-item');
     acceptButton.title = 'Accept';
     acceptButton.classList.add('accept');
     acceptButton.appendChild(this._recorder.document.createElement('x-div'));
-    acceptButton.addEventListener('click', () => options.onCommit());
+    acceptButton.addEventListener('click', () => options.onCommit?.());
 
     const cancelButton = this._recorder.document.createElement('x-pw-tool-item');
     cancelButton.title = 'Close';
@@ -1646,26 +1765,37 @@ class Dialog {
     });
 
     this._dialogElement = this._recorder.document.createElement('x-pw-dialog');
+    if (options.autosize)
+      this._dialogElement.classList.add('autosize');
+
     this._keyboardListener = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         this.close();
         options.onCancel?.();
         return;
       }
-      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      if (options.onCommit && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
         if (this._dialogElement)
           options.onCommit();
         return;
       }
     };
 
-    this._recorder.document.addEventListener('keydown', this._keyboardListener, true);
+    this._onGlassPaneClickHandler = (event: MouseEvent) => {
+      this.close();
+      options.onCancel?.();
+    };
+
+    // Ensure any clicks in the dialog are caught, rather than passing through to the page and thus closing the dialog
+    this._dialogElement.addEventListener('click', event => event.stopPropagation());
+
     const toolbarElement = this._recorder.document.createElement('x-pw-tools-list');
     const labelElement = this._recorder.document.createElement('label');
     labelElement.textContent = options.label;
     toolbarElement.appendChild(labelElement);
     toolbarElement.appendChild(this._recorder.document.createElement('x-spacer'));
-    toolbarElement.appendChild(acceptButton);
+    if (options.onCommit)
+      toolbarElement.appendChild(acceptButton);
     toolbarElement.appendChild(cancelButton);
 
     this._dialogElement.appendChild(toolbarElement);
@@ -1673,6 +1803,8 @@ class Dialog {
     bodyElement.appendChild(options.body);
     this._dialogElement.appendChild(bodyElement);
     this._recorder.highlight.appendChild(this._dialogElement);
+    this._recorder.highlight.onGlassPaneClick(this._onGlassPaneClickHandler);
+    this._recorder.document.addEventListener('keydown', this._keyboardListener, true);
     return this._dialogElement;
   }
 
@@ -1687,6 +1819,7 @@ class Dialog {
     if (!this._dialogElement)
       return;
     this._dialogElement.remove();
+    this._recorder.highlight.offGlassPaneClick(this._onGlassPaneClickHandler!);
     this._recorder.document.removeEventListener('keydown', this._keyboardListener!);
     this._dialogElement = null;
   }
@@ -1805,53 +1938,4 @@ function createSvgElement(doc: Document, { tagName, attrs, children }: SvgJson):
 
 function isAssertAction(action: actions.Action): action is actions.AssertAction {
   return action.name.startsWith('assert');
-}
-
-function findNewElement(from: AriaSnapshot | undefined, to: AriaSnapshot): Element | undefined {
-  type ByRoleAndName = Map<string, Map<string, { node: AriaNode, sizeAndPosition: number }>>;
-
-  function fillMap(root: AriaNode, map: ByRoleAndName, position: number) {
-    let size = 1;
-    let childPosition = position + size;
-    for (const child of root.children || []) {
-      if (typeof child === 'string') {
-        size++;
-        childPosition++;
-      } else {
-        size += fillMap(child, map, childPosition);
-        childPosition += size;
-      }
-    }
-    if (!['none', 'presentation', 'fragment', 'iframe', 'generic'].includes(root.role) && root.name) {
-      let byRole = map.get(root.role);
-      if (!byRole) {
-        byRole = new Map();
-        map.set(root.role, byRole);
-      }
-      const existing = byRole.get(root.name);
-      // This heuristic prioritizes elements at the top of the page, even if somewhat smaller.
-      const sizeAndPosition = size * 100 - position;
-      if (!existing || existing.sizeAndPosition < sizeAndPosition)
-        byRole.set(root.name, { node: root, sizeAndPosition });
-    }
-    return size;
-  }
-
-  const fromMap: ByRoleAndName = new Map();
-  if (from)
-    fillMap(from.root, fromMap, 0);
-
-  const toMap: ByRoleAndName = new Map();
-  fillMap(to.root, toMap, 0);
-
-  const result: { node: AriaNode, sizeAndPosition: number }[] = [];
-  for (const [role, byRole] of toMap) {
-    for (const [name, byName] of byRole) {
-      const inFrom = fromMap.get(role)?.get(name);
-      if (!inFrom)
-        result.push(byName);
-    }
-  }
-  result.sort((a, b) => b.sizeAndPosition - a.sizeAndPosition);
-  return result[0]?.node.element;
 }
