@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 
-import { getAsBooleanFromENV } from 'playwright-core/lib/utils';
-import { ms as milliseconds } from 'playwright-core/lib/utilsBundle';
+import { getAsBooleanFromENV, msToString as milliseconds } from 'playwright-core/lib/utils';
 
-import { TerminalReporter, stepSuffix } from './base';
+import { markErrorsAsReported, TerminalReporter, stepSuffix } from './base';
 import { stripAnsiEscapes } from '../util';
 
 import type { ListReporterOptions } from '../../types/test';
@@ -38,6 +37,7 @@ class ListReporter extends TerminalReporter {
   private _stepIndex = new Map<TestStep, string>();
   private _needNewLine = false;
   private _printSteps: boolean;
+  private _paused = new Set<TestResult>();
 
   constructor(options?: ListReporterOptions & CommonReporterOptions & TerminalReporterOptions) {
     super(options);
@@ -68,12 +68,12 @@ class ListReporter extends TerminalReporter {
 
   override onStdOut(chunk: string | Buffer, test?: TestCase, result?: TestResult) {
     super.onStdOut(chunk, test, result);
-    this._dumpToStdio(test, chunk, this.screen.stdout);
+    this._dumpToStdio(test, chunk, this.screen.stdout, 'out');
   }
 
   override onStdErr(chunk: string | Buffer, test?: TestCase, result?: TestResult) {
     super.onStdErr(chunk, test, result);
-    this._dumpToStdio(test, chunk, this.screen.stderr);
+    this._dumpToStdio(test, chunk, this.screen.stderr, 'err');
   }
 
   private getStepIndex(testIndex: string, result: TestResult, step: TestStep): string {
@@ -157,7 +157,7 @@ class ListReporter extends TerminalReporter {
     }
   }
 
-  private _dumpToStdio(test: TestCase | undefined, chunk: string | Buffer, stream: NodeJS.WriteStream) {
+  private _dumpToStdio(test: TestCase | undefined, chunk: string | Buffer, stream: NodeJS.WriteStream, stdio: 'out' | 'err') {
     if (this.config.quiet)
       return;
     const text = chunk.toString('utf-8');
@@ -165,9 +165,34 @@ class ListReporter extends TerminalReporter {
     stream.write(chunk);
   }
 
+  async onTestPaused(test: TestCase, result: TestResult) {
+    // Without TTY, user cannot interrupt the pause. Let's skip it.
+    if (!process.stdin.isTTY && !process.env.PW_TEST_DEBUG_REPORTERS)
+      return;
+
+    this._paused.add(result);
+
+    this._updateTestLine(test, result);
+    this._maybeWriteNewLine();
+    if (test.outcome() === 'unexpected') {
+      const errors = this.formatResultErrors(test, result);
+      this.writeLine(errors);
+      this._updateLineCountAndNewLineFlagForOutput(errors);
+      markErrorsAsReported(result);
+    }
+    this._appendLine(this.screen.colors.yellow(`Paused ${test.outcome() === 'unexpected' ? 'on error' : 'at test end'}. Press Ctrl+C to end.`), this._testPrefix('', ''));
+
+    await new Promise<void>(() => {});
+  }
+
   override onTestEnd(test: TestCase, result: TestResult) {
     super.onTestEnd(test, result);
+    const wasPaused = this._paused.delete(result);
+    if (!wasPaused)
+      this._updateTestLine(test, result);
+  }
 
+  private _updateTestLine(test: TestCase, result: TestResult) {
     const title = this.formatTestTitle(test);
     let prefix = '';
     let text = '';

@@ -28,7 +28,7 @@ import { helper } from './helper';
 import { SdkObject } from './instrumentation';
 import { PipeTransport } from './pipeTransport';
 import { envArrayToObject, launchProcess } from './utils/processLauncher';
-import {  isProtocolError } from './protocolError';
+import { isProtocolError } from './protocolError';
 import { registry } from './registry';
 import { ClientCertificatesProxy } from './socksClientCertificatesInterceptor';
 import { WebSocketTransport } from './transport';
@@ -36,9 +36,7 @@ import { RecentLogsCollector } from './utils/debugLogger';
 
 import type { Browser, BrowserOptions, BrowserProcess } from './browser';
 import type { BrowserContext } from './browserContext';
-import type { Env } from './utils/processLauncher';
 import type { Progress } from './progress';
-import type { ProtocolError } from './protocolError';
 import type { BrowserName } from './registry';
 import type { ConnectionTransport } from './transport';
 import type * as types from './types';
@@ -58,7 +56,7 @@ export abstract class BrowserType extends SdkObject {
   }
 
   executablePath(): string {
-    return registry.findExecutable(this._name).executablePath(this.attribution.playwright.options.sdkLanguage) || '';
+    return registry.findExecutable(this._name).executablePath() || '';
   }
 
   name(): string {
@@ -93,7 +91,7 @@ export abstract class BrowserType extends SdkObject {
     }
   }
 
-  async _innerLaunchWithRetries(progress: Progress, options: types.LaunchOptions, persistent: types.BrowserContextOptions | undefined, protocolLogger: types.ProtocolLogger, userDataDir?: string): Promise<Browser> {
+  private async _innerLaunchWithRetries(progress: Progress, options: types.LaunchOptions, persistent: types.BrowserContextOptions | undefined, protocolLogger: types.ProtocolLogger, userDataDir?: string): Promise<Browser> {
     try {
       return await this._innerLaunch(progress, options, persistent, protocolLogger, userDataDir);
     } catch (error) {
@@ -107,7 +105,7 @@ export abstract class BrowserType extends SdkObject {
     }
   }
 
-  async _innerLaunch(progress: Progress, options: types.LaunchOptions, persistent: types.BrowserContextOptions | undefined, protocolLogger: types.ProtocolLogger, maybeUserDataDir?: string): Promise<Browser> {
+  private async _innerLaunch(progress: Progress, options: types.LaunchOptions, persistent: types.BrowserContextOptions | undefined, protocolLogger: types.ProtocolLogger, maybeUserDataDir?: string): Promise<Browser> {
     options.proxy = options.proxy ? normalizeProxySettings(options.proxy) : undefined;
     const browserLogsCollector = new RecentLogsCollector();
     const { browserProcess, userDataDir, artifactsDir, transport } = await this._launchProcess(progress, options, !!persistent, browserLogsCollector, maybeUserDataDir);
@@ -116,7 +114,7 @@ export abstract class BrowserType extends SdkObject {
         await progress.race((options as any).__testHookBeforeCreateBrowser());
       const browserOptions: BrowserOptions = {
         name: this._name,
-        isChromium: this._name === 'chromium',
+        browserType: this._name,
         channel: options.channel,
         slowMo: options.slowMo,
         persistent,
@@ -131,6 +129,7 @@ export abstract class BrowserType extends SdkObject {
         browserLogsCollector,
         wsEndpoint: transport instanceof WebSocketTransport ? transport.wsEndpoint : undefined,
         originalLaunchOptions: options,
+        userDataDir: persistent ? userDataDir : undefined,
       };
       if (persistent)
         validateBrowserContextOptions(persistent, browserOptions);
@@ -154,11 +153,14 @@ export abstract class BrowserType extends SdkObject {
       args = [],
       executablePath = null,
     } = options;
-    await this._createArtifactDirs(options);
-
     const tempDirectories: string[] = [];
-    const artifactsDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'playwright-artifacts-'));
-    tempDirectories.push(artifactsDir);
+    let artifactsDir: string;
+    if (options.artifactsDir) {
+      artifactsDir = options.artifactsDir;
+    } else {
+      artifactsDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'playwright-artifacts-'));
+      tempDirectories.push(artifactsDir);
+    }
 
     if (userDataDir) {
       assert(path.isAbsolute(userDataDir), 'userDataDir must be an absolute path');
@@ -175,9 +177,9 @@ export abstract class BrowserType extends SdkObject {
     if (ignoreAllDefaultArgs)
       browserArguments.push(...args);
     else if (ignoreDefaultArgs)
-      browserArguments.push(...this.defaultArgs(options, isPersistent, userDataDir).filter(arg => ignoreDefaultArgs.indexOf(arg) === -1));
+      browserArguments.push(...(await this.defaultArgs(options, isPersistent, userDataDir)).filter(arg => ignoreDefaultArgs.indexOf(arg) === -1));
     else
-      browserArguments.push(...this.defaultArgs(options, isPersistent, userDataDir));
+      browserArguments.push(...await this.defaultArgs(options, isPersistent, userDataDir));
 
     let executable: string;
     if (executablePath) {
@@ -213,7 +215,7 @@ export abstract class BrowserType extends SdkObject {
     const { launchedProcess, gracefullyClose, kill } = await launchProcess({
       command: prepared.executable,
       args: prepared.browserArguments,
-      env: this.amendEnvironment(env, prepared.userDataDir, isPersistent),
+      env: this.amendEnvironment(env, prepared.userDataDir, isPersistent, options),
       handleSIGINT,
       handleSIGTERM,
       handleSIGHUP,
@@ -265,6 +267,11 @@ export abstract class BrowserType extends SdkObject {
         this.waitForReadyState(options, browserLogsCollector),
         exitPromise.then(() => ({ wsEndpoint: undefined })),
       ]);
+      if (exitPromise.isDone()) {
+        const log = helper.formatBrowserLogs(browserLogsCollector.recentLogs());
+        const updatedLog = this.doRewriteStartupLog(log);
+        throw new Error(`Failed to launch the browser process.\nBrowser logs:\n${updatedLog}`);
+      }
       if (options.cdpPort !== undefined || !this.supportsPipeTransport()) {
         transport = await WebSocketTransport.connect(progress, wsEndpoint!);
       } else {
@@ -278,14 +285,11 @@ export abstract class BrowserType extends SdkObject {
     }
   }
 
-  async _createArtifactDirs(options: types.LaunchOptions): Promise<void> {
-    if (options.downloadsPath)
-      await fs.promises.mkdir(options.downloadsPath, { recursive: true });
-    if (options.tracesDir)
-      await fs.promises.mkdir(options.tracesDir, { recursive: true });
+  async connectOverCDP(progress: Progress, endpointURL: string, options: { slowMo?: number, timeout?: number, headers?: types.HeadersArray, isLocal?: boolean }): Promise<Browser> {
+    throw new Error('CDP connections are only supported by Chromium');
   }
 
-  async connectOverCDP(progress: Progress, endpointURL: string, options: { slowMo?: number, timeout?: number, headers?: types.HeadersArray }): Promise<Browser> {
+  async connectOverCDPTransport(progress: Progress, transport: ConnectionTransport): Promise<Browser> {
     throw new Error('CDP connections are only supported by Chromium');
   }
 
@@ -294,15 +298,14 @@ export abstract class BrowserType extends SdkObject {
   }
 
   private _validateLaunchOptions(options: types.LaunchOptions): types.LaunchOptions {
-    const { devtools = false } = options;
-    let { headless = !devtools, downloadsPath, proxy } = options;
+    let { headless = true, downloadsPath, proxy } = options;
     if (debugMode() === 'inspector')
       headless = false;
     if (downloadsPath && !path.isAbsolute(downloadsPath))
       downloadsPath = path.join(process.cwd(), downloadsPath);
     if (options.socksProxyPort)
       proxy = { server: `socks5://127.0.0.1:${options.socksProxyPort}` };
-    return { ...options, devtools, headless, downloadsPath, proxy };
+    return { ...options, headless, downloadsPath, proxy };
   }
 
   protected _createUserDataDirArgMisuseError(userDataDirArg: string): Error {
@@ -318,10 +321,12 @@ export abstract class BrowserType extends SdkObject {
     }
   }
 
-  _rewriteStartupLog(error: Error): Error {
+  private _rewriteStartupLog(error: Error): Error {
     if (!isProtocolError(error))
       return error;
-    return this.doRewriteStartupLog(error);
+    if (error.logs)
+      error.logs = this.doRewriteStartupLog(error.logs);
+    return error;
   }
 
   async waitForReadyState(options: types.LaunchOptions, browserLogsCollector: RecentLogsCollector): Promise<{ wsEndpoint?: string }> {
@@ -339,10 +344,10 @@ export abstract class BrowserType extends SdkObject {
     return options.channel || this._name;
   }
 
-  abstract defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string): string[];
+  abstract defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string): Promise<string[]>;
   abstract connectToTransport(transport: ConnectionTransport, options: BrowserOptions, browserLogsCollector: RecentLogsCollector): Promise<Browser>;
-  abstract amendEnvironment(env: Env, userDataDir: string, isPersistent: boolean): Env;
-  abstract doRewriteStartupLog(error: ProtocolError): ProtocolError;
+  abstract amendEnvironment(env: NodeJS.ProcessEnv, userDataDir: string, isPersistent: boolean, options: types.LaunchOptions): NodeJS.ProcessEnv;
+  abstract doRewriteStartupLog(logs: string): string;
   abstract attemptToGracefullyCloseBrowser(transport: ConnectionTransport): void;
 }
 

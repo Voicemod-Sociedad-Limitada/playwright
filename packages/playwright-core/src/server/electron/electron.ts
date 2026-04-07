@@ -86,7 +86,6 @@ export class ElectronApplication extends SdkObject {
     this._nodeSession.on('Runtime.consoleAPICalled', event => this._onConsoleAPI(event));
     const appClosePromise = new Promise(f => this.once(ElectronApplication.Events.Close, f));
     this._browserContext.setCustomCloseHandler(async () => {
-      await this._browserContext.stopVideoRecording();
       const electronHandle = await this._nodeElectronHandlePromise;
       await electronHandle.evaluate(({ app }) => app.quit()).catch(() => {});
       this._nodeConnection.close();
@@ -114,7 +113,7 @@ export class ElectronApplication extends SdkObject {
     if (!this._nodeExecutionContext)
       return;
     const args = event.args.map(arg => createHandle(this._nodeExecutionContext!, arg));
-    const message = new ConsoleMessage(null, event.type, undefined, args, toConsoleMessageLocation(event.stackTrace));
+    const message = new ConsoleMessage(null, null, event.type, undefined, args, toConsoleMessageLocation(event.stackTrace), event.timestamp);
     this.emit(ElectronApplication.Events.Console, message);
   }
 
@@ -160,12 +159,18 @@ export class Electron extends SdkObject {
     let electronArguments = ['--inspect=0', '--remote-debugging-port=0', ...(options.args || [])];
 
     if (os.platform() === 'linux') {
-      const runningAsRoot = process.geteuid && process.geteuid() === 0;
-      if (runningAsRoot && electronArguments.indexOf('--no-sandbox') === -1)
+      if (!options.chromiumSandbox && electronArguments.indexOf('--no-sandbox') === -1)
         electronArguments.unshift('--no-sandbox');
     }
 
-    const artifactsDir = await progress.race(fs.promises.mkdtemp(ARTIFACTS_FOLDER));
+    let artifactsDir: string;
+    const tempDirectories: string[] = [];
+    if (options.artifactsDir) {
+      artifactsDir = options.artifactsDir;
+    } else {
+      artifactsDir = await progress.race(fs.promises.mkdtemp(ARTIFACTS_FOLDER));
+      tempDirectories.push(artifactsDir);
+    }
     const browserLogsCollector = new RecentLogsCollector();
     const env = options.env ? envArrayToObject(options.env) : process.env;
 
@@ -195,10 +200,11 @@ export class Electron extends SdkObject {
       // On Windows in order to run .cmd files, shell: true is required.
       // https://github.com/nodejs/node/issues/52554
       shell = true;
-      // On Windows, we need to quote the executable path due to shell: true.
-      command = `"${command}"`;
-      // On Windows, we need to quote the arguments due to shell: true.
-      electronArguments = electronArguments.map(arg => `"${arg}"`);
+      // On Windows, we need to quote the executable path and arguments due to shell: true.
+      // We allso pass the arguments as a single string due to DEP0190,
+      // see https://github.com/microsoft/playwright/issues/38278.
+      command = [command, ...electronArguments].map(arg => `"${escapeDoubleQuotes(arg)}"`).join(' ');
+      electronArguments = [];
     }
 
     // When debugging Playwright test that runs Electron, NODE_OPTIONS
@@ -216,7 +222,7 @@ export class Electron extends SdkObject {
       shell,
       stdio: 'pipe',
       cwd: options.cwd,
-      tempDirectories: [artifactsDir],
+      tempDirectories,
       attemptToGracefullyClose: () => app!.close(),
       handleSIGINT: true,
       handleSIGTERM: true,
@@ -267,7 +273,7 @@ export class Electron extends SdkObject {
       };
       const browserOptions: BrowserOptions = {
         name: 'electron',
-        isChromium: true,
+        browserType: 'chromium',
         headful: true,
         persistent: contextOptions,
         browserProcess,
@@ -314,4 +320,8 @@ async function waitForLine(progress: Progress, process: childProcess.ChildProces
   } finally {
     eventsHelper.removeEventListeners(listeners);
   }
+}
+
+function escapeDoubleQuotes(str: string): string {
+  return str.replace(/"/g, '\\"');
 }

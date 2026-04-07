@@ -880,17 +880,17 @@ test('page.pause() should disable test timeout', async ({ runInlineTest }) => {
       import { test, expect } from '@playwright/test';
 
       test('test', async ({ page }) => {
-        test.setTimeout(2000);
+        test.setTimeout(4000);
 
         await Promise.race([
           page.pause(),
-          new Promise(f => setTimeout(f, 3000)),
+          new Promise(f => setTimeout(f, 5000)),
         ]);
 
         console.log('success!');
       });
     `,
-  }, { headed: true });
+  }, { headed: true });  // This needs to be headed otherwise entire worker is gone.
   expect(result.exitCode).toBe(0);
   expect(result.passed).toBe(1);
   expect(result.output).toContain('success!');
@@ -961,5 +961,24 @@ test('init script should not observe playwright internals', async ({ server, run
       });
     `,
   }, {}, { PWDEBUG: '0' });
+  expect(result.exitCode).toBe(0);
+});
+
+test('should pause test timeout while on pause', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.test.ts': `
+      import { test, expect } from '@playwright/test';
+
+      test('test', async ({ page, context }) => {
+        await context.debugger.requestPause();
+        const paused = new Promise(f => context.debugger.once('pausedstatechanged', f));
+        const contentPromise = page.setContent('<div>hello</div>');
+        await paused;
+        await new Promise(f => setTimeout(f, 5000));
+        await context.debugger.resume();
+        await contentPromise;
+      });
+    `,
+  }, { timeout: 3000 });
   expect(result.exitCode).toBe(0);
 });

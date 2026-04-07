@@ -210,18 +210,8 @@ const workspace = new Workspace(ROOT_PATH, [
     files: ['LICENSE'],
   }),
   new PWPackage({
-    name: '@playwright/experimental-ct-svelte',
-    path: path.join(ROOT_PATH, 'packages', 'playwright-ct-svelte'),
-    files: ['LICENSE'],
-  }),
-  new PWPackage({
     name: '@playwright/experimental-ct-vue',
     path: path.join(ROOT_PATH, 'packages', 'playwright-ct-vue'),
-    files: ['LICENSE'],
-  }),
-  new PWPackage({
-    name: '@playwright/test-runner-mcp',
-    path: path.join(ROOT_PATH, 'packages', 'playwright-test-mcp'),
     files: ['LICENSE'],
   }),
 ]);

@@ -43,6 +43,22 @@ it('should work', async ({ page, server }) => {
   expect(result).toBe(36);
 });
 
+it('should dispose', async ({ page, server }) => {
+  const binding = await page.exposeFunction('compute', function(a, b) {
+    return a * b;
+  });
+  const result = await page.evaluate(async function() {
+    return await window['compute'](9, 4);
+  });
+  expect(result).toBe(36);
+  await binding.dispose();
+
+  const e = await page.evaluate(async function() {
+    return await window['compute'](9, 4);
+  }).catch(e => e);
+  expect(e.message).toContain('is not a function');
+});
+
 it('should work with handles and complex objects', async ({ page, server }) => {
   const fooHandle = await page.evaluateHandle(() => {
     window['fooValue'] = { bar: 2 };
@@ -291,4 +307,15 @@ it('should fail with busted Array.prototype.toJSON', async ({ page }) => {
   await expect(() => page.evaluate(`add(5, 6)`)).rejects.toThrowError('serializedArgs is not an array. This can happen when Array.prototype.toJSON is defined incorrectly');
 
   expect.soft(await page.evaluate(() => ([] as any).toJSON())).toBe('"[]"');
+});
+
+it('exposeBinding should work in parallel', { annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/37712' } }, async ({ page }) => {
+  await Promise.all([
+    page.exposeBinding('foo', () => 42),
+    page.exposeBinding('bar', () => 42),
+  ]);
+  await page.evaluate(() => {
+    (window as any).foo();
+    (window as any).bar();
+  });
 });

@@ -91,6 +91,7 @@ export class FrameExecutionContext extends js.ExecutionContext {
         testIdAttributeName: selectorsRegistry.testIdAttributeName(),
         stableRafCount: this.frame._page.delegate.rafCountForStablePosition(),
         browserName: this.frame._page.browserContext._browser.options.name,
+        isUtilityWorld: this.world === 'utility',
         customEngines,
       };
       const source = `
@@ -226,7 +227,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
     await this._waitAndScrollIntoViewIfNeeded(progress, false /* waitForVisible */);
   }
 
-  private async _clickablePoint(): Promise<types.Point | 'error:notvisible' | 'error:notinviewport' | 'error:notconnected'> {
+  private async _clickablePoint(): Promise<{ point: types.Point, box: types.Rect } | 'error:notvisible' | 'error:notinviewport' | 'error:notconnected'> {
     const intersectQuadWithViewport = (quad: types.Quad): types.Quad => {
       return quad.map(point => ({
         x: Math.min(Math.max(point.x, 0), metrics.width),
@@ -259,6 +260,8 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
     const filtered = quads.map(quad => intersectQuadWithViewport(quad)).filter(quad => computeQuadArea(quad) > 0.99);
     if (!filtered.length)
       return 'error:notinviewport';
+    const quad = filtered[0];
+    const box = quadToRect(quad);
     if (this._page.browserContext._browser.options.name === 'firefox') {
       // Firefox internally uses integer coordinates, so 8.x is converted to 8 or 9 when clicking.
       //
@@ -267,17 +270,17 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       // So, clicking at (8.x;8.y) will sometimes click at (9;9) and miss the target.
       //
       // Therefore, we try to find an integer point within a quad to make sure we click inside the element.
-      for (const quad of filtered) {
-        const integerPoint = findIntegerPointInsideQuad(quad);
+      for (const q of filtered) {
+        const integerPoint = findIntegerPointInsideQuad(q);
         if (integerPoint)
-          return integerPoint;
+          return { point: integerPoint, box };
       }
     }
     // Return the middle point of the first quad.
-    return quadMiddlePoint(filtered[0]);
+    return { point: quadMiddlePoint(quad), box };
   }
 
-  private async _offsetPoint(offset: types.Point): Promise<types.Point | 'error:notvisible' | 'error:notconnected'> {
+  private async _offsetPoint(offset: types.Point): Promise<{ point: types.Point, box: types.Rect } | 'error:notvisible' | 'error:notconnected'> {
     const [box, border] = await Promise.all([
       this.boundingBox(),
       this.evaluateInUtility(([injected, node]) => injected.getElementBorderWidth(node), {}).catch(e => {}),
@@ -288,15 +291,19 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       return border;
     // Make point relative to the padding box to align with offsetX/offsetY.
     return {
-      x: box.x + border.left + offset.x,
-      y: box.y + border.top + offset.y,
+      point: {
+        x: box.x + border.left + offset.x,
+        y: box.y + border.top + offset.y,
+      },
+      box,
     };
   }
 
-  async _retryAction(progress: Progress, actionName: string, action: (retry: number) => Promise<PerformActionResult>, options: { trial?: boolean, force?: boolean, skipActionPreChecks?: boolean }): Promise<'error:notconnected' | 'done'> {
+  async _retryAction(progress: Progress, actionName: string, action: (retry: number) => Promise<PerformActionResult>, options: { trial?: boolean, force?: boolean, skipActionPreChecks?: boolean, noAutoWaiting?: boolean }): Promise<'error:notconnected' | 'done'> {
     let retry = 0;
     // We progressively wait longer between retries, up to 500ms.
     const waitTime = [0, 20, 100, 100, 500];
+    const noAutoWaiting = (options as any).__testHookNoAutoWaiting ?? options.noAutoWaiting;
 
     while (true) {
       if (retry) {
@@ -311,35 +318,43 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       } else {
         progress.log(`attempting ${actionName} action${options.trial ? ' (trial run)' : ''}`);
       }
-      if (!options.skipActionPreChecks && !options.force)
+      if (!options.skipActionPreChecks && !options.force && !noAutoWaiting)
         await this._frame._page.performActionPreChecks(progress);
       const result = await action(retry);
       ++retry;
       if (result === 'error:notvisible') {
-        if (options.force)
+        if (options.force || noAutoWaiting)
           throw new NonRecoverableDOMError('Element is not visible');
         progress.log('  element is not visible');
         continue;
       }
       if (result === 'error:notinviewport') {
-        if (options.force)
+        if (options.force || noAutoWaiting)
           throw new NonRecoverableDOMError('Element is outside of the viewport');
         progress.log('  element is outside of the viewport');
         continue;
       }
       if (result === 'error:optionsnotfound') {
+        if (noAutoWaiting)
+          throw new NonRecoverableDOMError('Did not find some options');
         progress.log('  did not find some options');
         continue;
       }
       if (result === 'error:optionnotenabled') {
+        if (noAutoWaiting)
+          throw new NonRecoverableDOMError('Option being selected is not enabled');
         progress.log('  option being selected is not enabled');
         continue;
       }
       if (typeof result === 'object' && 'hitTargetDescription' in result) {
+        if (noAutoWaiting)
+          throw new NonRecoverableDOMError(`${result.hitTargetDescription} intercepts pointer events`);
         progress.log(`  ${result.hitTargetDescription} intercepts pointer events`);
         continue;
       }
       if (typeof result === 'object' && 'missingState' in result) {
+        if (noAutoWaiting)
+          throw new NonRecoverableDOMError(`Element is not ${result.missingState}`);
         progress.log(`  element is not ${result.missingState}`);
         continue;
       }
@@ -418,11 +433,12 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       return scrolled;
     progress.log('  done scrolling');
 
-    const maybePoint = position ? await progress.race(this._offsetPoint(position)) : await progress.race(this._clickablePoint());
-    if (typeof maybePoint === 'string')
-      return maybePoint;
-    const point = roundPoint(maybePoint);
+    const maybeResult = position ? await progress.race(this._offsetPoint(position)) : await progress.race(this._clickablePoint());
+    if (typeof maybeResult === 'string')
+      return maybeResult;
+    const point = roundPoint(maybeResult.point);
     progress.metadata.point = point;
+    progress.metadata.box = maybeResult.box;
     await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
 
     let hitTargetInterceptionHandle: js.JSHandle<HitTargetInterceptionResult> | undefined;
@@ -545,10 +561,16 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
     return throwRetargetableDOMError(result);
   }
 
+  private async _beforeNonPointerAction(progress: Progress) {
+    if (progress.metadata.annotate)
+      progress.metadata.box = await this.boundingBox() || undefined;
+    await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+  }
+
   async _selectOption(progress: Progress, elements: ElementHandle[], values: types.SelectOption[], options: types.CommonActionOptions): Promise<string[] | 'error:notconnected'> {
     let resultingOptions: string[] = [];
     const result = await this._retryAction(progress, 'select option', async () => {
-      await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+      await this._beforeNonPointerAction(progress);
       if (!options.force)
         progress.log(`  waiting for element to be visible and enabled`);
       const optionsToSelect = [...elements, ...values];
@@ -581,7 +603,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
   async _fill(progress: Progress, value: string, options: types.CommonActionOptions): Promise<'error:notconnected' | 'done'> {
     progress.log(`  fill("${value}")`);
     return await this._retryAction(progress, 'fill', async () => {
-      await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+      await this._beforeNonPointerAction(progress);
       if (!options.force)
         progress.log('  waiting for element to be visible, enabled and editable');
       const result = await progress.race(this.evaluateInUtility(async ([injected, node, { value, force }]) => {
@@ -594,7 +616,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       }, { value, force: options.force }));
       if (result === 'needsinput') {
         if (value)
-          await this._page.keyboard.insertText(progress, value);
+          await this._page.keyboard._insertText(progress, value);
         else
           await this._page.keyboard.press(progress, 'Delete');
         return 'done';
@@ -648,7 +670,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
     if (result === 'error:notconnected' || !result.asElement())
       return 'error:notconnected';
     const retargeted = result.asElement() as ElementHandle<HTMLInputElement>;
-    await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+    await this._beforeNonPointerAction(progress);
     if (localPaths || localDirectory) {
       const localPathsOrDirectory = localDirectory ? [localDirectory] : localPaths!;
       await progress.race(Promise.all((localPathsOrDirectory).map(localPath => (
@@ -689,7 +711,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
 
   async _type(progress: Progress, text: string, options: { delay?: number } & types.StrictOptions): Promise<'error:notconnected' | 'done'> {
     progress.log(`elementHandle.type("${text}")`);
-    await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+    await this._beforeNonPointerAction(progress);
     const result = await this._focus(progress, true /* resetSelectionIfNotFocused */);
     if (result !== 'done')
       return result;
@@ -705,7 +727,7 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
 
   async _press(progress: Progress, key: string, options: { delay?: number, noWaitAfter?: boolean } & types.StrictOptions): Promise<'error:notconnected' | 'done'> {
     progress.log(`elementHandle.press("${key}")`);
-    await progress.race(this.instrumentation.onBeforeInputAction(this, progress.metadata));
+    await this._beforeNonPointerAction(progress);
     return this._page.frameManager.waitForSignalsCreatedBy(progress, !options.noWaitAfter, async () => {
       const result = await this._focus(progress, true /* resetSelectionIfNotFocused */);
       if (result !== 'done')
@@ -730,27 +752,27 @@ export class ElementHandle<T extends Node = Node> extends js.JSHandle<T> {
       const result = await progress.race(this.evaluateInUtility(([injected, node]) => injected.elementState(node, 'checked'), {}));
       if (result === 'error:notconnected' || result.received === 'error:notconnected')
         throwElementIsNotAttached();
-      return result.matches;
+      return { matches: result.matches, isRadio: result.isRadio };
     };
     await this._markAsTargetElement(progress);
-    if (await isChecked() === state)
+    const checkedState = await isChecked();
+    if (checkedState.matches === state)
       return 'done';
+    if (!state && checkedState.isRadio)
+      throw new NonRecoverableDOMError('Cannot uncheck radio button. Radio buttons can only be unchecked by selecting another radio button in the same group.');
     const result = await this._click(progress, { ...options, waitAfter: 'disabled' });
     if (result !== 'done')
       return result;
     if (options.trial)
       return 'done';
-    if (await isChecked() !== state)
+    const finalState = await isChecked();
+    if (finalState.matches !== state)
       throw new NonRecoverableDOMError('Clicking the checkbox did not change its state');
     return 'done';
   }
 
   async boundingBox(): Promise<types.Rect | null> {
     return this._page.delegate.getBoundingBox(this);
-  }
-
-  async ariaSnapshot(): Promise<string> {
-    return await this.evaluateInUtility(([injected, element]) => injected.ariaSnapshot(element, { mode: 'expect' }), {});
   }
 
   async screenshot(progress: Progress, options: ScreenshotOptions): Promise<Buffer> {
@@ -876,6 +898,17 @@ function roundPoint(point: types.Point): types.Point {
     x: (point.x * 100 | 0) / 100,
     y: (point.y * 100 | 0) / 100,
   };
+}
+
+function quadToRect(quad: types.Quad): types.Rect {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const point of quad) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
 function quadMiddlePoint(quad: types.Quad): types.Point {

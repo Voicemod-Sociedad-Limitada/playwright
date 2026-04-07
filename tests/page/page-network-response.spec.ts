@@ -230,10 +230,11 @@ it('should behave the same way for headers and allHeaders', async ({ page, serve
   expect(allHeaders['name-b']).toEqual('v4');
 });
 
-it('should provide a Response with a file URL', async ({ page, asset, isAndroid, isElectron, isWindows, browserName, mode }) => {
+it('should provide a Response with a file URL', async ({ page, asset, isAndroid, isElectron, isWindows, browserName, mode, channel }) => {
   it.skip(isAndroid, 'No files on Android');
   it.skip(browserName === 'firefox', 'Firefox does return null for file:// URLs');
   it.skip(mode.startsWith('service'));
+  it.skip(channel === 'webkit-wsl');
 
   const fileurl = url.pathToFileURL(asset('frames/two-frames.html')).href;
   const response = await page.goto(fileurl);
@@ -385,4 +386,43 @@ it('should bypass disk cache when context interception is enabled', async ({ pag
       });
     }
   }
+});
+
+it('request.existingResponse should return null before response is received', async ({ page, server }) => {
+  await page.goto(server.EMPTY_PAGE);
+  let serverResponse = null;
+  server.setRoute('/get', (req, res) => {
+    serverResponse = res;
+    // Don't end the response yet
+  });
+
+  const [request] = await Promise.all([
+    page.waitForEvent('request'),
+    server.waitForRequest('/get'),
+    page.evaluate(() => { void fetch('./get', { method: 'GET' }); }),
+  ]);
+
+  // Response hasn't been received yet
+  expect(request.existingResponse()).toBe(null);
+
+  // Now send the response
+  serverResponse.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  serverResponse.end('done');
+  await page.waitForEvent('response');
+
+  // After response is received, existingResponse should return the response
+  const existingResponse = request.existingResponse();
+  expect(existingResponse).not.toBe(null);
+  expect(existingResponse.status()).toBe(200);
+});
+
+it('request.existingResponse should return the response after it is received', async ({ page, server }) => {
+  const response = await page.goto(server.EMPTY_PAGE);
+  const request = response.request();
+  expect(request.existingResponse()).toBe(response);
+});
+
+it('should return http version', async ({ page, server }) => {
+  const response = await page.goto(server.EMPTY_PAGE);
+  expect(await response.httpVersion()).toBe('HTTP/1.1');
 });

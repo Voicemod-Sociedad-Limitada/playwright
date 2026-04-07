@@ -20,7 +20,7 @@ import url from 'url';
 import util from 'util';
 
 import { parseStackFrame, sanitizeForFilePath, calculateSha1, isRegExp, isString, stringifyStackFrames } from 'playwright-core/lib/utils';
-import { colors, debug, mime, minimatch } from 'playwright-core/lib/utilsBundle';
+import { debug, mime, minimatch } from 'playwright-core/lib/utilsBundle';
 
 import type { Location } from './../types/testReporter';
 import type { TestInfoErrorImpl } from './common/ipc';
@@ -85,14 +85,19 @@ export type TestFileFilter = {
 
 export type TestCaseFilter = (test: TestCase) => boolean;
 
+export function parseLocationArg(arg: string): { file: string, line: number | null, column: number | null } {
+  const match = /^(.*?):(\d+):?(\d+)?$/.exec(arg);
+  return {
+    file: match ? match[1] : arg,
+    line: match ? parseInt(match[2], 10) : null,
+    column: match?.[3] ? parseInt(match[3], 10) : null,
+  };
+}
+
 export function createFileFiltersFromArguments(args: string[]): TestFileFilter[] {
   return args.map(arg => {
-    const match = /^(.*?):(\d+):?(\d+)?$/.exec(arg);
-    return {
-      re: forceRegExp(match ? match[1] : arg),
-      line: match ? parseInt(match[2], 10) : null,
-      column: match?.[3] ? parseInt(match[3], 10) : null,
-    };
+    const parsed = parseLocationArg(arg);
+    return { re: forceRegExp(parsed.file), line: parsed.line, column: parsed.column };
   });
 }
 
@@ -226,15 +231,6 @@ export function getContainedPath(parentPath: string, subPath: string = ''): stri
 }
 
 export const debugTest = debug('pw:test');
-
-export const callLogText = (log: string[] | undefined) => {
-  if (!log || !log.some(l => !!l))
-    return '';
-  return `
-Call log:
-${colors.dim(log.join('\n'))}
-`;
-};
 
 const folderToPackageJsonPath = new Map<string, string>();
 
@@ -418,7 +414,4 @@ export async function removeDirAndLogToConsole(dir: string) {
   }
 }
 
-export const ansiRegex = new RegExp('([\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~])))', 'g');
-export function stripAnsiEscapes(str: string): string {
-  return str.replace(ansiRegex, '');
-}
+export { ansiRegex, stripAnsiEscapes } from 'playwright-core/lib/utils';

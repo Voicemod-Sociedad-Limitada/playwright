@@ -92,7 +92,7 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).DblClickAsync()
   });
 
   test('should click twice', async ({ openRecorder }) => {
-    const { page, recorder } = await openRecorder();
+    const { recorder } = await openRecorder();
 
     await recorder.setContentAndWait(`<button onclick="console.log('click')">Submit</button>`);
 
@@ -102,14 +102,13 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).DblClickAsync()
     await Promise.all([
       recorder.waitForOutput('JavaScript', 'click'),
       recorder.trustedClick(),
+      recorder.waitForActionPerformed(),
     ]);
-
-    // Do not trigger double click.
-    await page.waitForTimeout(200);
 
     const [sources] = await Promise.all([
       recorder.waitForOutput('JavaScript', `click();\n  await`),
       recorder.trustedClick(),
+      recorder.waitForActionPerformed(),
     ]);
 
     expect(sources.get('JavaScript')!.text).toContain(`
@@ -127,14 +126,13 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).DblClickAsync()
     await Promise.all([
       recorder.waitForOutput('JavaScript', 'click'),
       recorder.trustedClick(),
+      recorder.waitForActionPerformed(),
     ]);
-
-    // Do not trigger double click.
-    await page.waitForTimeout(200);
 
     await Promise.all([
       recorder.waitForOutput('JavaScript', `click();\n  await`),
       recorder.trustedClick(),
+      recorder.waitForActionPerformed(),
     ]);
 
     await page.keyboard.type('bar');
@@ -238,9 +236,9 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).DblClickAsync()
         .setPosition(250, 250));`);
 
     expect(sources.get('C#')!.text).toContain(`
-await page.Locator("canvas").ClickAsync(new LocatorClickOptions
+await page.Locator("canvas").ClickAsync(new()
 {
-    Position = new Position
+    Position = new()
     {
         X = 250,
         Y = 250,
@@ -975,13 +973,13 @@ await page.GetByRole(AriaRole.Textbox).FillAsync("h");`);
         .setButton(MouseButton.MIDDLE));`);
 
     expect(sources.get('C#')!.text).toContain(`
-await page.GetByText("Click me").ClickAsync(new LocatorClickOptions
+await page.GetByText("Click me").ClickAsync(new()
 {
     Button = MouseButton.Middle,
 });`);
   });
 
-  test('should record slider', async ({ openRecorder }) => {
+  test('should record slider', async ({ openRecorder, browserName, headless }) => {
     const { page, recorder } = await openRecorder();
 
     await recorder.setContentAndWait(`<input type="range" min="0" max="10" value="5">`);
@@ -990,7 +988,8 @@ await page.GetByText("Click me").ClickAsync(new LocatorClickOptions
       const { x, y, width, height } = await page.locator('input').boundingBox();
       await page.mouse.move(x + width / 2, y + height / 2);
       await page.mouse.down();
-      await page.mouse.move(x + width, y + height / 2);
+      // Dragging to the exact edge is not registered as slider change, so drag close to the end.
+      await page.mouse.move(x + width - 3, y + height / 2);
       await page.mouse.up();
     };
 
@@ -1058,8 +1057,9 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).ClickAsync();`)
     await Promise.all([
       recorder.waitForOutput('JavaScript', 'click'),
       page.locator('button').click(),
+      recorder.waitForActionPerformed(),
     ]);
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);  // See "signalThreshold" is signal processor.
     await page.goto(server.PREFIX + `/empty.html`);
     await recorder.waitForOutput('JavaScript', `await page.goto('${server.PREFIX}/empty.html');`);
   });
@@ -1070,8 +1070,9 @@ await page.GetByRole(AriaRole.Button, new() { Name = "Submit" }).ClickAsync();`)
     await Promise.all([
       recorder.waitForOutput('JavaScript', 'fill'),
       page.locator('textarea').fill('Hello world'),
+      recorder.waitForActionPerformed(),
     ]);
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);  // See "signalThreshold" is signal processor.
     await page.goto(server.PREFIX + `/empty.html`);
     await recorder.waitForOutput('JavaScript', `await page.goto('${server.PREFIX}/empty.html');`);
   });

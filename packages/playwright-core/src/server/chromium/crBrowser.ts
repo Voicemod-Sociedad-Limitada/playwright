@@ -46,10 +46,11 @@ export class CRBrowser extends Browser {
   private _clientRootSessionPromise: Promise<CDPSession> | null = null;
   readonly _contexts = new Map<string, CRBrowserContext>();
   _crPages = new Map<string, CRPage>();
-  _backgroundPages = new Map<string, CRPage>();
   _serviceWorkers = new Map<string, CRServiceWorker>();
   _devtools?: CRDevTools;
   private _version = '';
+  private _majorVersion = 0;
+  _revision = '';
 
   private _tracingRecording = false;
   private _tracingClient: CRSession | undefined;
@@ -68,7 +69,12 @@ export class CRBrowser extends Browser {
       await (options as any).__testHookOnConnectToBrowser();
 
     const version = await session.send('Browser.getVersion');
+    browser._revision = version.revision;
     browser._version = version.product.substring(version.product.indexOf('/') + 1);
+    try {
+      browser._majorVersion = +browser._version.split('.')[0];
+    } catch {
+    }
     browser._userAgent = version.userAgent;
     // We don't trust the option as it may lie in case of connectOverCDP where remote browser
     // may have been launched with different options.
@@ -106,10 +112,10 @@ export class CRBrowser extends Browser {
     const proxy = options.proxyOverride || options.proxy;
     let proxyBypassList = undefined;
     if (proxy) {
-      if (process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK)
-        proxyBypassList = proxy.bypass;
-      else
+      if (shouldProxyLoopback(proxy.bypass))
         proxyBypassList = '<-loopback>' + (proxy.bypass ? `,${proxy.bypass}` : '');
+      else
+        proxyBypassList = proxy.bypass;
     }
 
     const { browserContextId } = await this._session.send('Target.createBrowserContext', {
@@ -129,6 +135,10 @@ export class CRBrowser extends Browser {
 
   version(): string {
     return this._version;
+  }
+
+  majorVersion() {
+    return this._majorVersion;
   }
 
   userAgent(): string {
@@ -151,7 +161,7 @@ export class CRBrowser extends Browser {
     await Promise.all([...this._crPages.values()].map(crPage => crPage._page.waitForInitializedOrError()));
   }
 
-  _onAttachedToTarget({ targetInfo, sessionId }: Protocol.Target.attachedToTargetPayload) {
+  _onAttachedToTarget({ targetInfo, sessionId, waitingForDebugger }: Protocol.Target.attachedToTargetPayload) {
     if (targetInfo.type === 'browser')
       return;
     const session = this._session.createChildSession(sessionId);
@@ -176,18 +186,11 @@ export class CRBrowser extends Browser {
     }
 
     assert(!this._crPages.has(targetInfo.targetId), 'Duplicate target ' + targetInfo.targetId);
-    assert(!this._backgroundPages.has(targetInfo.targetId), 'Duplicate target ' + targetInfo.targetId);
     assert(!this._serviceWorkers.has(targetInfo.targetId), 'Duplicate target ' + targetInfo.targetId);
-
-    if (targetInfo.type === 'background_page') {
-      const backgroundPage = new CRPage(session, targetInfo.targetId, context, null, { hasUIWindow: false, isBackgroundPage: true });
-      this._backgroundPages.set(targetInfo.targetId, backgroundPage);
-      return;
-    }
 
     if (targetInfo.type === 'page' || treatOtherAsPage) {
       const opener = targetInfo.openerId ? this._crPages.get(targetInfo.openerId) || null : null;
-      const crPage = new CRPage(session, targetInfo.targetId, context, opener, { hasUIWindow: targetInfo.type === 'page', isBackgroundPage: false });
+      const crPage = new CRPage(session, targetInfo.targetId, context, opener, { hasUIWindow: targetInfo.type === 'page' });
       this._crPages.set(targetInfo.targetId, crPage);
       return;
     }
@@ -215,12 +218,6 @@ export class CRBrowser extends Browser {
       crPage.didClose();
       return;
     }
-    const backgroundPage = this._backgroundPages.get(targetId);
-    if (backgroundPage) {
-      this._backgroundPages.delete(targetId);
-      backgroundPage.didClose();
-      return;
-    }
     const serviceWorker = this._serviceWorkers.get(targetId);
     if (serviceWorker) {
       this._serviceWorkers.delete(targetId);
@@ -233,9 +230,6 @@ export class CRBrowser extends Browser {
     for (const crPage of this._crPages.values())
       crPage.didClose();
     this._crPages.clear();
-    for (const backgroundPage of this._backgroundPages.values())
-      backgroundPage.didClose();
-    this._backgroundPages.clear();
     for (const serviceWorker of this._serviceWorkers.values())
       serviceWorker.didClose();
     this._serviceWorkers.clear();
@@ -335,11 +329,16 @@ export class CRBrowser extends Browser {
   }
 }
 
-export class CRBrowserContext extends BrowserContext {
-  static CREvents = {
-    BackgroundPage: 'backgroundpage',
-    ServiceWorker: 'serviceworker',
-  };
+const CREvents = {
+  ServiceWorker: 'serviceworker',
+} as const;
+
+export type CREventsMap = {
+  [CREvents.ServiceWorker]: [serviceWorker: CRServiceWorker];
+};
+
+export class CRBrowserContext extends BrowserContext<CREventsMap> {
+  static CREvents = CREvents;
 
   declare readonly _browser: CRBrowser;
 
@@ -437,7 +436,7 @@ export class CRBrowserContext extends BrowserContext {
   }
 
   async doGrantPermissions(origin: string, permissions: string[]) {
-    const webPermissionToProtocol = new Map<string, Protocol.Browser.PermissionType>([
+    const webPermissionToProtocol = new Map<string, Protocol.Browser.PermissionType | Protocol.Browser.PermissionType[]>([
       ['geolocation', 'geolocation'],
       ['midi', 'midi'],
       ['notifications', 'notifications'],
@@ -455,14 +454,28 @@ export class CRBrowserContext extends BrowserContext {
       ['midi-sysex', 'midiSysex'],
       ['storage-access', 'storageAccess'],
       ['local-fonts', 'localFonts'],
+      ['local-network-access', ['localNetworkAccess', 'localNetwork', 'loopbackNetwork']],
+      ['screen-wake-lock', 'wakeLockScreen'],
     ]);
-    const filtered = permissions.map(permission => {
-      const protocolPermission = webPermissionToProtocol.get(permission);
-      if (!protocolPermission)
-        throw new Error('Unknown permission: ' + permission);
-      return protocolPermission;
-    });
-    await this._browser._session.send('Browser.grantPermissions', { origin: origin === '*' ? undefined : origin, browserContextId: this._browserContextId, permissions: filtered });
+
+    const grantPermissions = async (mapping: Map<string, Protocol.Browser.PermissionType | Protocol.Browser.PermissionType[]>) => {
+      const filtered = permissions.flatMap(permission => {
+        const protocolPermission = mapping.get(permission);
+        if (!protocolPermission)
+          throw new Error('Unknown permission: ' + permission);
+        return typeof protocolPermission === 'string' ? [protocolPermission] : protocolPermission;
+      });
+      await this._browser._session.send('Browser.grantPermissions', { origin: origin === '*' ? undefined : origin, browserContextId: this._browserContextId, permissions: filtered });
+    };
+
+    try {
+      await grantPermissions(webPermissionToProtocol);
+    } catch (e) {
+      // Old stable browsers dislike the new permission name, so we use the fallback mapping.
+      const fallbackMapping = new Map(webPermissionToProtocol);
+      fallbackMapping.set('local-network-access', ['localNetworkAccess']);
+      await grantPermissions(fallbackMapping);
+    }
   }
 
   async doClearPermissions() {
@@ -543,7 +556,6 @@ export class CRBrowserContext extends BrowserContext {
     await this.dialogManager.closeBeforeUnloadDialogs();
 
     if (!this._browserContextId) {
-      await this.stopVideoRecording();
       // Closing persistent context should close the browser.
       await this._browser.close({ reason });
       return;
@@ -563,19 +575,7 @@ export class CRBrowserContext extends BrowserContext {
     }
   }
 
-  async stopVideoRecording() {
-    await Promise.all(this._crPages().map(crPage => crPage._mainFrameSession._stopVideoRecording()));
-  }
-
   onClosePersistent() {
-    // When persistent context is closed, we do not necessary get Target.detachedFromTarget
-    // for all the background pages.
-    for (const [targetId, backgroundPage] of this._browser._backgroundPages.entries()) {
-      if (backgroundPage._browserContext === this && backgroundPage._page.initializedOrUndefined()) {
-        backgroundPage.didClose();
-        this._browser._backgroundPages.delete(targetId);
-      }
-    }
   }
 
   override async clearCache(): Promise<void> {
@@ -591,15 +591,6 @@ export class CRBrowserContext extends BrowserContext {
       guid: guid,
       browserContextId: this._browserContextId,
     });
-  }
-
-  backgroundPages(): Page[] {
-    const result: Page[] = [];
-    for (const backgroundPage of this._browser._backgroundPages.values()) {
-      if (backgroundPage._browserContext === this && backgroundPage._page.initializedOrUndefined())
-        result.push(backgroundPage._page);
-    }
-    return result;
   }
 
   serviceWorkers(): Worker[] {
@@ -622,4 +613,12 @@ export class CRBrowserContext extends BrowserContext {
     const rootSession = await this._browser._clientRootSession();
     return rootSession.attachToTarget(targetId);
   }
+}
+
+export function shouldProxyLoopback(bypass: string | undefined) {
+  if (process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK)
+    return false;
+  const hosts = (bypass || '').split(',').map(s => s.trim());
+  const shouldBypassSomeLoopback = ['localhost', '127.0.0.1', '::1', '[::]', '[::1]', '<loopback>', '<-loopback>'].some(host => hosts.includes(host));
+  return !shouldBypassSomeLoopback;
 }

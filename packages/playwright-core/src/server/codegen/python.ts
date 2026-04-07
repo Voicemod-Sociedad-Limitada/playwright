@@ -19,7 +19,7 @@ import { asLocator, escapeWithQuotes, toSnakeCase } from '../../utils';
 import { deviceDescriptors } from '../deviceDescriptors';
 
 import type { Language, LanguageGenerator, LanguageGeneratorOptions } from './types';
-import type { BrowserContextOptions } from '../../../types/types';
+import type { BrowserContextOptions } from '../../..';
 import type * as actions from '@recorder/actions';
 
 export class PythonLanguageGenerator implements LanguageGenerator {
@@ -100,6 +100,8 @@ export class PythonLanguageGenerator implements LanguageGenerator {
         const optionsString = formatOptions(options, false);
         return `${subject}.${this._asLocator(action.selector)}.${method}(${optionsString})`;
       }
+      case 'hover':
+        return `${subject}.${this._asLocator(action.selector)}.hover(${formatOptions({ position: action.position }, false)})`;
       case 'check':
         return `${subject}.${this._asLocator(action.selector)}.check()`;
       case 'uncheck':

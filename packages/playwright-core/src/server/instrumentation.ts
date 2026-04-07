@@ -17,6 +17,7 @@
 import { EventEmitter } from 'events';
 
 import { createGuid } from './utils/crypto';
+import { debugLogger } from './utils/debugLogger';
 
 import type { Browser } from './browser';
 import type { BrowserContext } from './browserContext';
@@ -40,7 +41,10 @@ export type Attribution = {
   frame?: Frame;
 };
 
-export class SdkObject extends EventEmitter {
+
+export type EventMap = Record<string | symbol, any[]>;
+
+export class SdkObject<EM extends EventMap = EventMap> extends EventEmitter<EM> {
   guid: string;
   attribution: Attribution;
   instrumentation: Instrumentation;
@@ -52,6 +56,17 @@ export class SdkObject extends EventEmitter {
     this.setMaxListeners(0);
     this.attribution = { ...parent.attribution };
     this.instrumentation = parent.instrumentation;
+  }
+
+  apiLog(message: string) {
+    if (!this.attribution.playwright.options.isInternalPlaywright)
+      debugLogger.log('api', message);
+  }
+
+  closeReason(): string | undefined {
+    return this.attribution.page?._closeReason ||
+      this.attribution.context?._closeReason ||
+      this.attribution.browser?._closeReason;
   }
 }
 
@@ -65,7 +80,7 @@ export function createRootSdkObject() {
 export interface Instrumentation {
   addListener(listener: InstrumentationListener, context: BrowserContext | APIRequestContext | null): void;
   removeListener(listener: InstrumentationListener): void;
-  onBeforeCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
+  onBeforeCall(sdkObject: SdkObject, metadata: CallMetadata, parentId?: string): Promise<void>;
   onBeforeInputAction(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
   onCallLog(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
@@ -78,7 +93,7 @@ export interface Instrumentation {
 }
 
 export interface InstrumentationListener {
-  onBeforeCall?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
+  onBeforeCall?(sdkObject: SdkObject, metadata: CallMetadata, parentId?: string): Promise<void>;
   onBeforeInputAction?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
   onCallLog?(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;

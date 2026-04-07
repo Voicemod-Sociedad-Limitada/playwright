@@ -16,7 +16,6 @@
 
 import url from 'url';
 import { contextTest as it, expect } from '../config/browserTest';
-import { hostPlatform } from '../../packages/playwright-core/src/server/utils/hostPlatform';
 
 it('SharedArrayBuffer should work @smoke', async function({ contextFactory, httpsServer }) {
   const context = await contextFactory({ ignoreHTTPSErrors: true });
@@ -24,7 +23,12 @@ it('SharedArrayBuffer should work @smoke', async function({ contextFactory, http
   httpsServer.setRoute('/sharedarraybuffer', (req, res) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-    res.end();
+    // Note: without 'onload', Firefox sometimes does not fire the load event
+    // over the protocol. The reason is unclear.
+    res.end(`
+      <div>Hello there!</div>
+      <script>window.onload = () => console.log('onload')</script>
+    `);
   });
   await page.goto(httpsServer.PREFIX + '/sharedarraybuffer');
   expect(await page.evaluate(() => typeof SharedArrayBuffer)).toBe('function');
@@ -64,7 +68,6 @@ it('should respect CSP @smoke', async ({ page, server }) => {
 
 it('should play video @smoke', async ({ page, asset, browserName, isWindows, isLinux, mode }) => {
   it.skip(browserName === 'webkit' && isWindows, 'passes locally but fails on GitHub Action bot, apparently due to a Media Pack issue in the Windows Server');
-  it.fixme(browserName === 'firefox' && isLinux, 'https://github.com/microsoft/playwright/issues/5721');
   it.skip(mode.startsWith('service'));
 
   // Safari only plays mp4 so we test WebKit with an .mp4 clip.
@@ -241,18 +244,19 @@ it('window.GestureEvent in WebKit', async ({ page, server, browserName }) => {
   expect(type).toBe(browserName === 'webkit' ? 'function' : 'undefined');
 });
 
-it('requestFullscreen', async ({ page, server }) => {
+it('requestFullscreen', async ({ page, server, browserName, headless }) => {
   it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/22832' });
+  it.fixme(browserName === 'firefox' && !headless, 'Error: Request for fullscreen was denied because requesting element is not in the currently focused tab');
   await page.goto(server.EMPTY_PAGE);
   await page.evaluate(() => {
     const result = new Promise(resolve => document.addEventListener('fullscreenchange', resolve));
-    void document.documentElement.requestFullscreen();
+    void document.documentElement.requestFullscreen().then(() => console.log('success')).catch(e => console.log(e));
     return result;
   });
   expect(await page.evaluate(() => document.fullscreenElement === document.documentElement)).toBeTruthy();
   await page.evaluate(() => {
     const result = new Promise(resolve => document.addEventListener('fullscreenchange', resolve));
-    void document.exitFullscreen();
+    void document.exitFullscreen().then(() => console.log('success')).catch(e => console.log(e));
     return result;
   });
   expect(await page.evaluate(() => !!document.fullscreenElement)).toBeFalsy();
@@ -387,10 +391,9 @@ it('should be able to render avif images', {
     type: 'issue',
     description: 'https://github.com/microsoft/playwright/issues/32673',
   }
-}, async ({ page, server, browserName, platform }) => {
+}, async ({ page, server, browserName, platform, isFrozenWebkit }) => {
   it.fixme(browserName === 'webkit' && platform === 'win32');
-  it.skip(browserName === 'webkit' && hostPlatform.startsWith('ubuntu20.04'), 'Ubuntu 20.04 is frozen');
-  it.skip(browserName === 'webkit' && hostPlatform.startsWith('debian11'), 'Debian 11 is too old');
+  it.skip(isFrozenWebkit);
   await page.goto(server.EMPTY_PAGE);
   await page.setContent(`<img src="${server.PREFIX}/rgb.avif" onerror="window.error = true">`);
   await expect.poll(() => page.locator('img').boundingBox()).toEqual(expect.objectContaining({
@@ -468,7 +471,10 @@ it('should not auto play audio', {
     });
   });
   await page.goto('http://127.0.0.1/audio.html');
-  await expect(page.locator('#log')).toHaveText('State: suspended');
+  if (browserName === 'webkit')
+    await expect(page.locator('#log')).toHaveText(/State: (interrupted|suspended)/);
+  else
+    await expect(page.locator('#log')).toHaveText('State: suspended');
 });
 
 it('should not crash on feature detection for PublicKeyCredential', {

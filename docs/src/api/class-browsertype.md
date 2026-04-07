@@ -96,9 +96,9 @@ This method attaches Playwright to an existing browser instance created via `Bro
 The major and minor version of the Playwright instance that connects needs to match the version of Playwright that launches the browser (1.2.3 → is compatible with 1.2.x).
 :::
 
-### param: BrowserType.connect.wsEndpoint
+### param: BrowserType.connect.endpoint
 * since: v1.10
-- `wsEndpoint` <[string]>
+- `endpoint` <[string]>
 
 A Playwright browser websocket endpoint to connect to. You obtain this endpoint via `BrowserServer.wsEndpoint`.
 
@@ -212,12 +212,12 @@ A CDP websocket endpoint or http url to connect to. For example `http://localhos
 
 Additional HTTP headers to be sent with connect request. Optional.
 
-### option: BrowserType.connectOverCDP.slowMo
-* since: v1.11
-- `slowMo` <[float]>
+### option: BrowserType.connectOverCDP.isLocal
+* since: v1.58
+- `isLocal` <[boolean]>
 
-Slows down Playwright operations by the specified amount of milliseconds. Useful so that you
-can see what is going on. Defaults to 0.
+Tells Playwright that it runs on the same host as the CDP server. It will enable certain optimizations that rely upon
+the file system being the same between Playwright and the Browser.
 
 ### option: BrowserType.connectOverCDP.logger
 * since: v1.14
@@ -226,6 +226,13 @@ can see what is going on. Defaults to 0.
 - `logger` <[Logger]>
 
 Logger sink for Playwright logging. Optional.
+
+### option: BrowserType.connectOverCDP.slowMo
+* since: v1.11
+- `slowMo` <[float]>
+
+Slows down Playwright operations by the specified amount of milliseconds. Useful so that you
+can see what is going on. Defaults to 0.
 
 ### option: BrowserType.connectOverCDP.timeout
 * since: v1.11

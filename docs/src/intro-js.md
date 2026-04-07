@@ -79,13 +79,11 @@ package.json
 package-lock.json            # Or yarn.lock / pnpm-lock.yaml
 tests/
   example.spec.ts            # Minimal example test
-tests-examples/
-  demo-todo-app.spec.ts      # Richer example tests
 ```
 
 The [playwright.config](./test-configuration.md) centralizes configuration: target browsers, timeouts, retries, projects, reporters and more. In existing projects dependencies are added to your current `package.json`.
 
-`tests/` contains a minimal starter test. `tests-examples/` provides richer samples (e.g. a todo app) to explore patterns.
+`tests/` contains a minimal starter test.
 
 ## Running the Example Test
 
@@ -305,7 +303,7 @@ pnpm exec playwright --version
 ## System requirements
 
 - Node.js: latest 20.x, 22.x or 24.x.
-- Windows 10+, Windows Server 2016+ or Windows Subsystem for Linux (WSL).
+- Windows 11+, Windows Server 2019+ or Windows Subsystem for Linux (WSL).
 - macOS 14 (Ventura) or later.
 - Debian 12 / 13, Ubuntu 22.04 / 24.04 (x86-64 or arm64).
 

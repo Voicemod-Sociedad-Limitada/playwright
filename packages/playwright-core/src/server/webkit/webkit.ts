@@ -21,11 +21,10 @@ import { kBrowserCloseMessageId } from './wkConnection';
 import { wrapInASCIIBox } from '../utils/ascii';
 import { BrowserType, kNoXServerRunningError } from '../browserType';
 import { WKBrowser } from '../webkit/wkBrowser';
+import { spawnAsync } from '../utils/spawnAsync';
 
 import type { BrowserOptions } from '../browser';
 import type { SdkObject } from '../instrumentation';
-import type { Env } from '../utils/processLauncher';
-import type { ProtocolError } from '../protocolError';
 import type { ConnectionTransport } from '../transport';
 import type * as types from '../types';
 
@@ -38,19 +37,17 @@ export class WebKit extends BrowserType {
     return WKBrowser.connect(this.attribution.playwright, transport, options);
   }
 
-  override amendEnvironment(env: Env, userDataDir: string, isPersistent: boolean): Env {
+  override amendEnvironment(env: NodeJS.ProcessEnv, userDataDir: string, isPersistent: boolean, options: types.LaunchOptions): NodeJS.ProcessEnv {
     return {
       ...env,
       CURL_COOKIE_JAR_PATH: process.platform === 'win32' && isPersistent ? path.join(userDataDir, 'cookiejar.db') : undefined,
     };
   }
 
-  override doRewriteStartupLog(error: ProtocolError): ProtocolError {
-    if (!error.logs)
-      return error;
-    if (error.logs.includes('Failed to open display') || error.logs.includes('cannot open display'))
-      error.logs = '\n' + wrapInASCIIBox(kNoXServerRunningError, 1);
-    return error;
+  override doRewriteStartupLog(logs: string): string {
+    if (logs.includes('Failed to open display') || logs.includes('cannot open display'))
+      logs = '\n' + wrapInASCIIBox(kNoXServerRunningError, 1);
+    return logs;
   }
 
   override attemptToGracefullyCloseBrowser(transport: ConnectionTransport): void {
@@ -58,7 +55,7 @@ export class WebKit extends BrowserType {
     transport.send({ method: 'Playwright.close', params: {}, id: kBrowserCloseMessageId });
   }
 
-  override defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string): string[] {
+  override async defaultArgs(options: types.LaunchOptions, isPersistent: boolean, userDataDir: string): Promise<string[]> {
     const { args = [], headless } = options;
     const userDataDirArg = args.find(arg => arg.startsWith('--user-data-dir'));
     if (userDataDirArg)
@@ -66,12 +63,13 @@ export class WebKit extends BrowserType {
     if (args.find(arg => !arg.startsWith('-')))
       throw new Error('Arguments can not specify page to be opened');
     const webkitArguments = ['--inspector-pipe'];
-    if (process.platform === 'win32')
+
+    if (process.platform === 'win32' && options.channel !== 'webkit-wsl')
       webkitArguments.push('--disable-accelerated-compositing');
     if (headless)
       webkitArguments.push('--headless');
     if (isPersistent)
-      webkitArguments.push(`--user-data-dir=${userDataDir}`);
+      webkitArguments.push(`--user-data-dir=${options.channel === 'webkit-wsl' ? await translatePathToWSL(userDataDir) : userDataDir}`);
     else
       webkitArguments.push(`--no-startup-window`);
     const proxy = options.proxyOverride || options.proxy;
@@ -80,7 +78,7 @@ export class WebKit extends BrowserType {
         webkitArguments.push(`--proxy=${proxy.server}`);
         if (proxy.bypass)
           webkitArguments.push(`--proxy-bypass-list=${proxy.bypass}`);
-      } else if (process.platform === 'linux') {
+      } else if (process.platform === 'linux' || (process.platform === 'win32' && options.channel === 'webkit-wsl')) {
         webkitArguments.push(`--proxy=${proxy.server}`);
         if (proxy.bypass)
           webkitArguments.push(...proxy.bypass.split(',').map(t => `--ignore-host=${t}`));
@@ -97,4 +95,9 @@ export class WebKit extends BrowserType {
       webkitArguments.push('about:blank');
     return webkitArguments;
   }
+}
+
+export async function translatePathToWSL(path: string): Promise<string> {
+  const { stdout } = await spawnAsync('wsl.exe', ['-d', 'playwright', '--cd', '/home/pwuser', 'wslpath', path.replace(/\\/g, '\\\\')]);
+  return stdout.toString().trim();
 }

@@ -21,6 +21,7 @@ import { currentTestInfo, currentlyLoadingFileSuite, setCurrentlyLoadingFileSuit
 import { Suite, TestCase } from './test';
 import { expect } from '../matchers/expect';
 import { wrapFunctionWithLocation } from '../transform/transform';
+import { validateTestDetails } from './validators';
 
 import type { FixturesWithLocation } from './config';
 import type { Fixtures, TestDetails, TestStepInfo, TestType } from '../../types/test';
@@ -264,6 +265,7 @@ export class TestTypeImpl {
     const testInfo = currentTestInfo();
     if (!testInfo)
       throw new Error(`test.step() can only be called from a test`);
+    await testInfo._onUserStepBegin?.(title);
     const step = testInfo._addStep({ category: 'test.step', title, location: options.location, box: options.box });
     return await currentZone().with('stepZone', step).run(async () => {
       try {
@@ -286,6 +288,8 @@ export class TestTypeImpl {
       } catch (error) {
         step.complete({ error });
         throw error;
+      } finally {
+        await testInfo._onUserStepEnd?.();
       }
     });
   }
@@ -307,17 +311,6 @@ function throwIfRunningInsideJest() {
         `See https://playwright.dev/docs/intro for more information about Playwright Test.`,
     );
   }
-}
-
-function validateTestDetails(details: TestDetails, location: Location) {
-  const originalAnnotations = Array.isArray(details.annotation) ? details.annotation : (details.annotation ? [details.annotation] : []);
-  const annotations = originalAnnotations.map(annotation => ({ ...annotation, location }));
-  const tags = Array.isArray(details.tag) ? details.tag : (details.tag ? [details.tag] : []);
-  for (const tag of tags) {
-    if (tag[0] !== '@')
-      throw new Error(`Tag must start with "@" symbol, got "${tag}" instead.`);
-  }
-  return { annotations, tags };
 }
 
 export const rootTestType = new TestTypeImpl([]);

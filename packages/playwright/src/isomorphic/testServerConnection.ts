@@ -21,6 +21,9 @@ import type * as reporterTypes from '../../types/testReporter';
 
 // -- Reuse boundary -- Everything below this line is reused in the vscode extension.
 
+export class TestServerConnectionClosedError extends Error {
+}
+
 export interface TestServerTransport {
   onmessage(listener: (message: string) => void): void;
   onopen(listener: () => void): void;
@@ -69,18 +72,18 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
   readonly onStdio: events.Event<{ type: 'stderr' | 'stdout'; text?: string | undefined; buffer?: string | undefined; }>;
   readonly onTestFilesChanged: events.Event<{ testFiles: string[] }>;
   readonly onLoadTraceRequested: events.Event<{ traceUrl: string }>;
-  readonly onRecoverFromStepError: events.Event<{ stepId: string, message: string, location: reporterTypes.Location }>;
+  readonly onTestPaused: events.Event<{ errors: reporterTypes.TestError[] }>;
 
   private _onCloseEmitter = new events.EventEmitter<void>();
   private _onReportEmitter = new events.EventEmitter<any>();
   private _onStdioEmitter = new events.EventEmitter<{ type: 'stderr' | 'stdout'; text?: string | undefined; buffer?: string | undefined; }>();
   private _onTestFilesChangedEmitter = new events.EventEmitter<{ testFiles: string[] }>();
   private _onLoadTraceRequestedEmitter = new events.EventEmitter<{ traceUrl: string }>();
-  private _onRecoverFromStepErrorEmitter = new events.EventEmitter<{ stepId: string, message: string, location: reporterTypes.Location }>();
+  private _onTestPausedEmitter = new events.EventEmitter<{ errors: reporterTypes.TestError[] }>();
 
   private _lastId = 0;
   private _transport: TestServerTransport;
-  private _callbacks = new Map<number, { resolve: (arg: any) => void, reject: (arg: Error) => void }>();
+  private _callbacks = new Map<number, { resolve: (arg: any) => void, reject: (arg: Error) => void, error: TestServerConnectionClosedError }>();
   private _connectedPromise: Promise<void>;
   private _isClosed = false;
 
@@ -90,7 +93,7 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
     this.onStdio = this._onStdioEmitter.event;
     this.onTestFilesChanged = this._onTestFilesChangedEmitter.event;
     this.onLoadTraceRequested = this._onLoadTraceRequestedEmitter.event;
-    this.onRecoverFromStepError = this._onRecoverFromStepErrorEmitter.event;
+    this.onTestPaused = this._onTestPausedEmitter.event;
 
     this._transport = transport;
     this._transport.onmessage(data => {
@@ -118,6 +121,9 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
       this._isClosed = true;
       this._onCloseEmitter.fire();
       clearInterval(pingInterval);
+      for (const callback of this._callbacks.values())
+        callback.reject(callback.error);
+      this._callbacks.clear();
     });
   }
 
@@ -132,9 +138,11 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
     await this._connectedPromise;
     const id = ++this._lastId;
     const message = { id, method, params };
+    // Capture proper stack trace in the error here.
+    const error = new TestServerConnectionClosedError(`${method}: test server connection closed`);
     this._transport.send(JSON.stringify(message));
     return new Promise((resolve, reject) => {
-      this._callbacks.set(id, { resolve, reject });
+      this._callbacks.set(id, { resolve, reject, error });
     });
   }
 
@@ -151,8 +159,8 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
       this._onTestFilesChangedEmitter.fire(params);
     else if (method === 'loadTraceRequested')
       this._onLoadTraceRequestedEmitter.fire(params);
-    else if (method === 'recoverFromStepError')
-      this._onRecoverFromStepErrorEmitter.fire(params);
+    else if (method === 'testPaused')
+      this._onTestPausedEmitter.fire(params);
   }
 
   async initialize(params: Parameters<TestServerInterface['initialize']>[0]): ReturnType<TestServerInterface['initialize']> {
@@ -245,10 +253,6 @@ export class TestServerConnection implements TestServerInterface, TestServerInte
 
   async closeGracefully(params: Parameters<TestServerInterface['closeGracefully']>[0]): ReturnType<TestServerInterface['closeGracefully']> {
     await this._sendMessage('closeGracefully', params);
-  }
-
-  async resumeAfterStepError(params: Parameters<TestServerInterface['resumeAfterStepError']>[0]): Promise<void> {
-    await this._sendMessage('resumeAfterStepError', params);
   }
 
   close() {

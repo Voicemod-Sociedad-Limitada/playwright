@@ -1,7 +1,7 @@
 /**
  * Copyright (c) Microsoft Corporation.
  *
- * Licensed under the Apache License, Version 2.0 (the 'License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -42,8 +42,6 @@ export function createInProcessPlaywright(): PlaywrightAPI {
   playwrightAPI.firefox._serverLauncher = new BrowserServerLauncherImpl('firefox');
   playwrightAPI.webkit._serverLauncher = new BrowserServerLauncherImpl('webkit');
   playwrightAPI._android._serverLauncher = new AndroidServerLauncherImpl();
-  playwrightAPI._bidiChromium._serverLauncher = new BrowserServerLauncherImpl('_bidiChromium');
-  playwrightAPI._bidiFirefox._serverLauncher = new BrowserServerLauncherImpl('_bidiFirefox');
 
   // Switch to async dispatch after we got Playwright object.
   dispatcherConnection.onmessage = message => setImmediate(() => clientConnection.dispatch(message));

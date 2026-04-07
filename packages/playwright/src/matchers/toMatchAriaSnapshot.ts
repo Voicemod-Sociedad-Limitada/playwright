@@ -18,17 +18,13 @@
 import fs from 'fs';
 import path from 'path';
 
-import { escapeTemplateString, isString } from 'playwright-core/lib/utils';
+import { formatMatcherMessage, escapeTemplateString, isString, printReceivedStringContainExpectedSubstring } from 'playwright-core/lib/utils';
 
-import {  kNoElementsFoundError, matcherHint } from './matcherHint';
-import { EXPECTED_COLOR } from '../common/expectBundle';
-import { callLogText, fileExistsAsync } from '../util';
-import { printReceivedStringContainExpectedSubstring } from './expect';
+import { fileExistsAsync } from '../util';
 import { currentTestInfo } from '../common/globals';
 
 import type { MatcherResult } from './matcherHint';
-import type { LocatorEx } from './matchers';
-import type { ExpectMatcherState } from '../../types/test';
+import type { ExpectMatcherStateInternal, LocatorEx } from './matchers';
 import type { MatcherReceived } from '@injected/ariaSnapshot';
 
 
@@ -39,8 +35,8 @@ type ToMatchAriaSnapshotExpected = {
 } | string;
 
 export async function toMatchAriaSnapshot(
-  this: ExpectMatcherState,
-  receiver: LocatorEx,
+  this: ExpectMatcherStateInternal,
+  locator: LocatorEx,
   expectedParam?: ToMatchAriaSnapshotExpected,
   options: { timeout?: number } = {},
 ): Promise<MatcherResult<string | RegExp, string>> {
@@ -50,17 +46,12 @@ export async function toMatchAriaSnapshot(
   if (!testInfo)
     throw new Error(`toMatchAriaSnapshot() must be called during the test`);
 
-  if (testInfo._projectInternal.ignoreSnapshots)
+  if (testInfo._projectInternal.project.ignoreSnapshots)
     return { pass: !this.isNot, message: () => '', name: 'toMatchAriaSnapshot', expected: '' };
 
   const updateSnapshots = testInfo.config.updateSnapshots;
   const pathTemplate = testInfo._projectInternal.expect?.toMatchAriaSnapshot?.pathTemplate;
   const defaultTemplate = '{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{ext}';
-
-  const matcherOptions = {
-    isNot: this.isNot,
-    promise: this.promise,
-  };
 
   let expected: string;
   let timeout: number;
@@ -91,35 +82,45 @@ export async function toMatchAriaSnapshot(
   }
 
   expected = unshift(expected);
-  const { matches: pass, received, log, timedOut } = await receiver._expect('to.match.aria', { expectedValue: expected, isNot: this.isNot, timeout });
-  const typedReceived = received as MatcherReceived | typeof kNoElementsFoundError;
 
-  const matcherHintWithExpect = (expectedReceivedString: string) => {
-    return matcherHint(this, receiver, matcherName, 'locator', undefined, matcherOptions, timedOut ? timeout : undefined, expectedReceivedString);
-  };
+  const globalChildren = testInfo._projectInternal.expect?.toMatchAriaSnapshot?.children;
+  if (globalChildren && !expected.match(/^- \/children:/m))
+    expected = `- /children: ${globalChildren}\n` + expected;
 
-  const notFound = typedReceived === kNoElementsFoundError;
-  if (notFound) {
-    return {
-      pass: this.isNot,
-      message: () => matcherHintWithExpect(`Expected: ${this.utils.printExpected(expected)}\nReceived: ${EXPECTED_COLOR('<element not found>')}`) + callLogText(log),
-      name: 'toMatchAriaSnapshot',
-      expected,
-    };
-  }
+  const { matches: pass, received, log, timedOut, errorMessage } = await locator._expect('to.match.aria', { expectedValue: expected, isNot: this.isNot, timeout });
+  const typedReceived = received as MatcherReceived;
 
-  const receivedText = typedReceived.raw;
   const message = () => {
-    if (pass) {
-      const receivedString = notFound ? receivedText : printReceivedStringContainExpectedSubstring(receivedText, receivedText.indexOf(expected), expected.length);
-      const expectedReceivedString = `Expected: not ${this.utils.printExpected(expected)}\nReceived: ${receivedString}`;
-      return matcherHintWithExpect(expectedReceivedString) + callLogText(log);
+    let printedExpected: string | undefined;
+    let printedReceived: string | undefined;
+    let printedDiff: string | undefined;
+    if (errorMessage) {
+      printedExpected = `Expected: ${this.isNot ? 'not ' : ''}${this.utils.printExpected(expected)}`;
+    } else if (pass) {
+      const receivedString = printReceivedStringContainExpectedSubstring(this.utils, typedReceived.raw, typedReceived.raw.indexOf(expected), expected.length);
+      printedExpected = `Expected: not ${this.utils.printExpected(expected)}`;
+      printedReceived = `Received: ${receivedString}`;
     } else {
-      const labelExpected = `Expected`;
-      const expectedReceivedString = notFound ? `${labelExpected}: ${this.utils.printExpected(expected)}\nReceived: ${receivedText}` : this.utils.printDiffOrStringify(expected, receivedText, labelExpected, 'Received', false);
-      return matcherHintWithExpect(expectedReceivedString) + callLogText(log);
+      printedDiff = this.utils.printDiffOrStringify(expected, typedReceived.raw, 'Expected', 'Received', false);
     }
+    return formatMatcherMessage(this.utils, {
+      isNot: this.isNot,
+      promise: this.promise,
+      matcherName,
+      expectation: 'expected',
+      locator: locator.toString(),
+      timeout,
+      timedOut,
+      printedExpected,
+      printedReceived,
+      printedDiff,
+      errorMessage,
+      log,
+    });
   };
+
+  if (errorMessage)
+    return { pass: this.isNot, message, name: 'toMatchAriaSnapshot', expected };
 
   if (!this.isNot) {
     if ((updateSnapshots === 'all') ||

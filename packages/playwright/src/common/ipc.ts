@@ -21,10 +21,9 @@ import { serializeCompilationCache } from '../transform/compilationCache';
 import type { ConfigLocation, FullConfigInternal } from './config';
 import type { ReporterDescription, TestInfoError, TestStatus } from '../../types/test';
 import type { SerializedCompilationCache  } from '../transform/compilationCache';
-import type { RecoverFromStepErrorResult } from '@testIsomorphic/testServerInterface';
 
 export type ConfigCLIOverrides = {
-  debug?: boolean;
+  debug?: 'inspector' | 'cli';
   failOnFlakyTests?: boolean;
   forbidOnly?: boolean;
   fullyParallel?: boolean;
@@ -32,12 +31,14 @@ export type ConfigCLIOverrides = {
   maxFailures?: number;
   outputDir?: string;
   preserveOutputDir?: boolean;
+  pause?: boolean;
   quiet?: boolean;
   repeatEach?: number;
   retries?: number;
   reporter?: ReporterDescription[];
   additionalReporters?: ReporterDescription[];
   shard?: { current: number, total: number };
+  shardWeights?: number[];
   timeout?: number;
   tsconfig?: string;
   ignoreSnapshots?: boolean;
@@ -67,7 +68,8 @@ export type WorkerInitParams = {
   projectId: string;
   config: SerializedConfig;
   artifactsDir: string;
-  recoverFromStepErrors: boolean;
+  pauseOnError: boolean;
+  pauseAtEnd: boolean;
 };
 
 export type TestBeginPayload = {
@@ -85,6 +87,24 @@ export type AttachmentPayload = {
 };
 
 export type TestInfoErrorImpl = TestInfoError;
+
+export type TestPausedPayload = {
+  testId: string;
+  errors: TestInfoErrorImpl[];
+  status: TestStatus;
+};
+
+export type ResumePayload = {};
+
+export type CustomMessageRequestPayload = {
+  testId: string;
+  request: any;
+};
+
+export type CustomMessageResponsePayload = {
+  response: any;
+  error?: TestInfoErrorImpl;
+};
 
 export type TestEndPayload = {
   testId: string;
@@ -106,14 +126,6 @@ export type StepBeginPayload = {
   wallTime: number;  // milliseconds since unix epoch
   location?: { file: string, line: number, column: number };
 };
-
-export type StepRecoverFromErrorPayload = {
-  testId: string;
-  stepId: string;
-  error: TestInfoErrorImpl;
-};
-
-export type ResumeAfterStepErrorPayload = RecoverFromStepErrorResult;
 
 export type StepEndPayload = {
   testId: string;
@@ -138,6 +150,7 @@ export type DonePayload = {
   fatalErrors: TestInfoErrorImpl[];
   skipTestsDueToSetupFailure: string[];  // test ids
   fatalUnknownTestIds?: string[];
+  stoppedDueToUnhandledErrorInTestFail?: boolean;
 };
 
 export type TestOutputPayload = {
